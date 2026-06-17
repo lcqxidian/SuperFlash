@@ -868,25 +868,12 @@ def openocd_success(kind: str, output: str) -> bool:
 
 
 def flash_with_openocd(project: Path, openocd: Path, elf: Path, target_cfg: str, args: argparse.Namespace, report: list[str]) -> None:
-    # 预热探针：上一条烧录可能残留脏状态，先连一次复位探针
-    warmup = [
-        str(openocd), "-f", args.interface_cfg, "-f", target_cfg,
-        "-c", f"adapter speed {args.adapter_speed}",
-        "-c", "init; reset sysresetreq; exit",
-    ]
-    try: subprocess.run(warmup, capture_output=True, timeout=10)
-    except: pass
-
     cmd = [
         str(openocd),
-        "-f",
-        args.interface_cfg,
-        "-f",
-        target_cfg,
-        "-c",
-        f"adapter speed {args.adapter_speed}",
-        "-c",
-        f"program {{{elf}}} verify reset exit",
+        "-f", args.interface_cfg,
+        "-f", target_cfg,
+        "-c", f"adapter speed {args.adapter_speed}",
+        "-c", f"program {{{elf}}} verify reset exit",
     ]
     code, output = run(cmd, cwd=project, allow_fail=True)
     report.extend(["Flash tool: OpenOCD", f"OpenOCD flash exit code: {code}", "```text", output.strip(), "```"])

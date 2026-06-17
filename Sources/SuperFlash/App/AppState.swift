@@ -47,6 +47,9 @@ final class AppState: ObservableObject {
     /// 任务代际计数器：防止旧进程 completionHandler 污染新任务状态
     private var taskGeneration: UInt = 0
 
+    /// 上次烧录的项目路径，用于检测项目切换
+    private var lastFlashedProjectURL: URL?
+
     init() {
         // 转发 RecentProjectStore 的变化到 AppState，确保 UI 刷新
         recentProjectStore.objectWillChange
@@ -266,6 +269,10 @@ final class AppState: ObservableObject {
         scriptRunner.completionHandler = { [weak self, gen] exitCode, _ in
             DispatchQueue.main.async {
                 guard let self, self.taskGeneration == gen else { return }
+                // 记录已烧录项目（用于探针预热判定）
+                if action == .buildAndFlash || action == .flash {
+                    self.lastFlashedProjectURL = project.rootURL
+                }
                 let fullLog = self.allLogText
                 if exitCode == 0 {
                     let verified = self.logParser.checkSuccess(log: fullLog, action: action)
@@ -299,6 +306,11 @@ final class AppState: ObservableObject {
                     self.diagnostics = self.logParser.parseDiagnostics(log: fullLog, vendor: vendor)
                 }
             }
+        }
+
+        // 项目切换探针预热：清空探针内部状态，避免首次烧录异常
+        if action != .build, project.rootURL != lastFlashedProjectURL {
+            scriptRunner.warmupProbe(vendor: vendor)
         }
 
         scriptRunner.run(

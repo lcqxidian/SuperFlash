@@ -493,13 +493,20 @@ def flash_or_verify(kind: str, project: Path, info: dict[str, Path | str | list[
     if probe == "xds110":
         flash_or_verify_xds110(kind, project, info, args, report)
     elif probe == "dslite_jlink":
-        report.append("SAM-ICE detected; using DSLite directly (skipping JLinkExe)")
-        log("SAM-ICE detected; using DSLite directly (skipping JLinkExe)")
+        report.append("SAM-ICE detected; trying JLinkExe first (DSLite fallback available)")
+        log("SAM-ICE detected; trying JLinkExe first")
         if kind == "verify":
-            report.append("SAM-ICE/DSLite: verify skipped (device runs immediately after flash)")
-            log("SAM-ICE/DSLite: verify skipped (device runs immediately after flash)")
+            report.append("SAM-ICE: verify skipped (device runs immediately after flash)")
+            log("SAM-ICE: verify skipped")
             return
-        flash_or_verify_dslite_jlink(kind, project, info, args, report)
+        try:
+            successfully = flash_or_verify_jlink(kind, project, info, args, report)
+        except SystemExit:
+            successfully = False
+        if not successfully:
+            report.append("JLinkExe failed; falling back to DSLite + J-Link ccxml")
+            log("JLinkExe failed; falling back to DSLite")
+            flash_or_verify_dslite_jlink(kind, project, info, args, report)
     else:
         successfully = flash_or_verify_jlink(kind, project, info, args, report)
         if not successfully:
@@ -560,15 +567,27 @@ def flash_or_verify_dslite_jlink(kind: str, project: Path, info: dict[str, Path 
     ccxml = ccxmls[0]
     hex_path = Path(str(info["hex"]))
     title = "Flash" if kind == "flash" else "Verify"
-    cmd = [str(dslite), "flash", f"--config={ccxml}", "-e"]
+    cmd = [str(dslite), "flash", f"--config={ccxml}"]
     if kind == "flash":
-        cmd.extend(["-f", "-u", str(hex_path)])
+        cmd.extend(["-e", "-f", "-u", str(hex_path)])
     else:
         cmd.extend(["-v", str(hex_path)])
     code, output = run(cmd, cwd=project, allow_fail=True)
+    log(f"[DSLite] exit_code={code}, has_success={'success' in output.lower()}, has_running={'running' in output.lower()}")
     lower = output.lower()
     if kind == "flash":
         succeeded = code == 0 and "success" in lower and ("running" in lower or "loaded" in lower)
+        # DSLite/SAM-ICE 烧录后可能拉住芯片复位不放，用 JLinkExe 强制 go 启动
+        jlink = shutil.which("JLinkExe")
+        if succeeded and jlink:
+            log("[JLink] Forcing go/run after DSLite flash...")
+            r = subprocess.run([jlink, "-NoGui", "1", "-Device", str(info.get("device", "UNKNOWN")),
+                               "-If", "SWD", "-Speed", "4000",
+                               "-CommandFile", "/dev/stdin"],
+                              input="g\nexit\n", text=True, capture_output=True, timeout=10)
+            log(f"[JLink] go result: rc={r.returncode}, out={r.stdout.strip()[-200:]}")
+        elif succeeded and not jlink:
+            log("[JLink] JLinkExe not found, skipping")
     else:
         succeeded = code == 0 and "success" in lower and "verification successful" in lower
         # SAM-ICE 冷启动后第一次 verify 常误报，重试一次即可
@@ -597,9 +616,9 @@ def flash_or_verify_xds110(kind: str, project: Path, info: dict[str, Path | str 
     ccxml = Path(str(info["xds110_ccxml"]))
     hex_path = Path(str(info["hex"]))
     title = "Flash" if kind == "flash" else "Verify"
-    cmd = [str(dslite), "flash", f"--config={ccxml}", "-e"]
+    cmd = [str(dslite), "flash", f"--config={ccxml}"]
     if kind == "flash":
-        cmd.extend(["-f", "-u", str(hex_path)])
+        cmd.extend(["-e", "-f", "-u", str(hex_path)])
     else:
         cmd.extend(["-v", str(hex_path)])
     code, output = run(cmd, cwd=project, allow_fail=True)

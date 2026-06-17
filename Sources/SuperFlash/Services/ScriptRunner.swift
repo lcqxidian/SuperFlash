@@ -100,6 +100,52 @@ final class ScriptRunner: @unchecked Sendable {
             try? task.run()
             task.waitUntilExit()
         }
+    }
 
+    /// 烧录前探针预热：独立连接一次后断开，清空探针内部状态机
+    func warmupProbe(vendor: ProjectVendor) {
+        print("[warmupProbe] vendor=\(vendor)")
+        switch vendor {
+        case .stm32:
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/openocd")
+            task.arguments = ["-f", "interface/stlink.cfg", "-f", "target/stm32f4x.cfg",
+                              "-c", "adapter speed 4000", "-c", "init; reset sysresetreq; exit"]
+            try? task.run()
+            task.waitUntilExit()
+            print("[warmupProbe] openocd done")
+        case .tiMSPM0:
+            // Search JLinkExe in common locations + PATH + user's known install
+            let jlinkCandidates = [
+                URL(fileURLWithPath: "/Users/lcq/SEGGER_JLink_V950/JLinkExe"),
+                URL(fileURLWithPath: "/opt/homebrew/bin/JLinkExe"),
+                URL(fileURLWithPath: "/usr/local/bin/JLinkExe"),
+            ] + (ProcessInfo.processInfo.environment["PATH"] ?? "")
+                .components(separatedBy: ":")
+                .map { URL(fileURLWithPath: $0).appendingPathComponent("JLinkExe") }
+            guard let jlink = jlinkCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+                print("[warmupProbe] JLinkExe not found")
+                return
+            }
+            print("[warmupProbe] JLinkExe found: \(jlink.path)")
+            let warmup = Process()
+            warmup.executableURL = jlink
+            warmup.arguments = ["-NoGui", "1", "-If", "SWD", "-Speed", "4000",
+                                "-Device", "UNKNOWN",
+                                "-CommandFile", "/dev/stdin"]
+            let input = Pipe()
+            warmup.standardInput = input
+            try? input.fileHandleForWriting.write(contentsOf: "connect\nexit\n".data(using: .utf8)!)
+            try? input.fileHandleForWriting.close()
+            let outPipe = Pipe()
+            warmup.standardOutput = outPipe
+            warmup.standardError = outPipe
+            try? warmup.run()
+            warmup.waitUntilExit()
+            let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            print("[warmupProbe] JLink warmup done, rc=\(warmup.terminationStatus), out=\(out.prefix(200))")
+        case .unknown:
+            print("[warmupProbe] unknown vendor, skipping")
+        }
     }
 }
