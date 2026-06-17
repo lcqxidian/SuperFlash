@@ -36,6 +36,9 @@ struct ContentView: View {
             ball.onBuild = { appState.runAction(.build) }
             ball.onBuildAndFlash = { appState.runAction(.buildAndFlash) }
             ball.onVerify = { appState.runAction(.verify) }
+            ball.onSwitchProject = { url in appState.selectProjectByURL(url) }
+            ball.recentProjects = appState.recentProjectStore.recentProjects
+            ball.activeProjectURL = appState.currentProject?.rootURL
 
             if appState.settingsStore.saveRecentProjects,
                !appState.recentProjectStore.recentProjects.isEmpty {
@@ -66,6 +69,16 @@ struct ContentView: View {
         .onChange(of: appState.buildProgress) { _, progress in
             guard FloatingBallManager.shared.isBallMode else { return }
             FloatingBallManager.shared.buildProgress = progress
+        }
+        // 同步最近项目列表到悬浮球
+        .onReceive(appState.recentProjectStore.objectWillChange) { _ in
+            let ball = FloatingBallManager.shared
+            ball.recentProjects = appState.recentProjectStore.recentProjects
+            ball.activeProjectURL = appState.currentProject?.rootURL
+        }
+        // 当前项目变更时同步到悬浮球（切换项目后弹窗立即反映新状态）
+        .onChange(of: appState.currentProject?.rootURL) { _, newURL in
+            FloatingBallManager.shared.activeProjectURL = newURL
         }
     }
 

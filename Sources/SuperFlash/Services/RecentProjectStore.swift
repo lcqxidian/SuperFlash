@@ -11,10 +11,14 @@ final class RecentProjectStore: ObservableObject {
     }
 
     func add(_ project: ProjectInfo) {
-        recentProjects.removeAll { $0.rootURL == project.rootURL }
-        recentProjects.insert(project, at: 0)
-        if recentProjects.count > maxItems {
-            recentProjects = Array(recentProjects.prefix(maxItems))
+        // 已存在时不调整顺序，仅更新显示名等信息
+        if let index = recentProjects.firstIndex(where: { $0.rootURL == project.rootURL }) {
+            recentProjects[index] = project
+        } else {
+            recentProjects.insert(project, at: 0)
+            if recentProjects.count > maxItems {
+                recentProjects = Array(recentProjects.prefix(maxItems))
+            }
         }
         save()
     }

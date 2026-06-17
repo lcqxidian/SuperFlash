@@ -290,24 +290,97 @@ def tail(text: str, max_lines: int = 120) -> str:
     return "\n".join(lines[-max_lines:])
 
 
-def generate_linker_script(project: Path, mcu: str) -> Path:
+def deduce_flash_size(mcu: str) -> int | None:
+    """从 MCU 型号命名推导 Flash 大小（KB），返回字节数或 None。"""
+    # 去除常见后缀 G、H、I、U 等封装字母
+    mcu = mcu.upper().replace("_FLASH", "")
+    # 匹配型号中的容量代码：STM32 + 系列 + 容量代码
+    # 如 STM32F407ZG → F4 → 容量代码 ZG → G=1MB
+    m = re.search(r"STM32\w+(\d)(\w)$", mcu)
+    if not m:
+        m = re.search(r"STM32\w+(\w)$", mcu)  # 尝试只取最后一个字母
+        size_code = m.group(1) if m else ""
+    else:
+        # 引脚数后的字母: STM32F407ZG 中的 G
+        size_code = m.group(2)
+
+    flash_table = {
+        "4": 16, "6": 32, "8": 64, "B": 128,
+        "C": 256, "D": 384, "E": 512, "F": 768,
+        "G": 1024, "H": 1536, "I": 2048,
+        # F1 系列特殊
+        "T": 512,
+    }
+    kb = flash_table.get(size_code)
+    if kb:
+        return kb * 1024
+    return None
+
+def deduce_ram_size(mcu: str, flash_size: int) -> int:
+    """根据系列和 Flash 估算 RAM 大小。"""
+    mcu_u = mcu.upper()
+    # STM32F1: RAM ≈ Flash/3 有上限
+    if "STM32F1" in mcu_u:
+        return min(flash_size // 3, 0x10000)
+    # STM32F4: 典型 128K~192K
+    if "STM32F4" in mcu_u:
+        if flash_size >= 0x200000:
+            return 0x30000  # 192KB
+        return 0x20000  # 128KB
+    # STM32F0/F3: 较小
+    if "STM32F0" in mcu_u or "STM32G0" in mcu_u:
+        return min(flash_size // 4, 0x2000)
+    # STM32H7: 大 RAM
+    if "STM32H7" in mcu_u:
+        return max(flash_size // 2, 0x100000)
+    # 其他系列按 1/4 估算
+    return min(max(flash_size // 4, 0x2000), 0x40000)
+
+def generate_linker_script(project: Path, mcu: str, flash_size_arg: str | None = None, ram_size_arg: str | None = None) -> Path:
     """Generate a linker script for the detected MCU when no .ld is found."""
     # Flash / RAM sizes for common STM32 MCUs (flash_size, ram_size)
     memory_map: dict[str, tuple[int, int]] = {
-        "STM32F103C8":  (0x10000,  0x5000),    # 64KB + 20KB
-        "STM32F103CB":  (0x20000,  0x5000),    # 128KB + 20KB
-        "STM32F103RC":  (0x40000,  0xC000),    # 256KB + 48KB
-        "STM32F103VC":  (0x40000,  0xC000),    # 256KB + 48KB
-        "STM32F103ZE":  (0x80000,  0x10000),   # 512KB + 64KB
-        "STM32F407VE":  (0x80000,  0x20000),   # 512KB + 128KB
-        "STM32F407VG":  (0x100000, 0x20000),   # 1MB + 128KB
-        "STM32F407ZE":  (0x80000,  0x20000),   # 512KB + 128KB
-        "STM32F407ZG":  (0x100000, 0x20000),   # 1MB + 128KB
-        "STM32F4ZGT6":  (0x100000, 0x20000),   # 1MB + 128KB（CCM 64KB 不连续，不可作栈空间）
-        "STM32F429ZG":  (0x100000, 0x30000),   # 1MB + 192KB
-        "STM32F429ZI":  (0x200000, 0x30000),   # 2MB + 192KB
+        "STM32F103C8":  (0x10000,  0x5000),
+        "STM32F103CB":  (0x20000,  0x5000),
+        "STM32F103RC":  (0x40000,  0xC000),
+        "STM32F103VC":  (0x40000,  0xC000),
+        "STM32F103ZE":  (0x80000,  0x10000),
+        "STM32F407VE":  (0x80000,  0x20000),
+        "STM32F407VG":  (0x100000, 0x20000),
+        "STM32F407ZE":  (0x80000,  0x20000),
+        "STM32F407ZG":  (0x100000, 0x20000),
+        "STM32F4ZGT6":  (0x100000, 0x20000),
+        "STM32F429ZG":  (0x100000, 0x30000),
+        "STM32F429ZI":  (0x200000, 0x30000),
     }
-    flash_size, ram_size = memory_map.get(mcu.upper(), (0x80000, 0x20000))
+    mcu_key = mcu.upper()
+    # 用户手动设置的优先
+    if flash_size_arg:
+        try: flash_size = int(str(flash_size_arg), 0)
+        except: flash_size = 0
+    else:
+        flash_size = 0
+    if ram_size_arg:
+        try: ram_size = int(str(ram_size_arg), 0)
+        except: ram_size = 0
+    else:
+        ram_size = 0
+
+    if not flash_size or not ram_size:
+        if mcu_key in memory_map:
+            fs, rs = memory_map[mcu_key]
+            flash_size = flash_size or fs
+            ram_size = ram_size or rs
+        else:
+            deduced = deduce_flash_size(mcu_key)
+            if deduced:
+                flash_size = flash_size or deduced
+                ram_size = ram_size or deduce_ram_size(mcu_key, flash_size)
+                log(f"[检测] 从型号名称推导：{mcu_key} → Flash={flash_size//1024}KB RAM={ram_size//1024}KB")
+            else:
+                flash_size = flash_size or 0x80000
+                ram_size = ram_size or 0x20000
+                log(f"[检测] 未查到 {mcu_key}，默认 Flash=512KB RAM=128KB，可在设置中手动指定")
     linker_dir = project / "codex_build"
     linker_dir.mkdir(parents=True, exist_ok=True)
     ld_path = linker_dir / "generated_linker.ld"
@@ -657,7 +730,7 @@ def is_armcc_syntax(startup: Path) -> bool:
     return "AREA" in text or ("DCD" in text and "PROC" in text)
 
 
-def discover_sources(project: Path, mcu: str | None = None) -> tuple[list[Path], list[Path], Path, Path]:
+def discover_sources(project: Path, mcu: str | None = None, flash_size_arg: str | None = None, ram_size_arg: str | None = None) -> tuple[list[Path], list[Path], Path, Path]:
     excluded = {"build", "Debug", "Release", "codex_build", ".git", ".settings", "cmake-build-debug", "cmake-build-release"}
     # ST 标准外设库中与当前芯片不兼容的文件（如 FMC 在 F407 上为 FSMC）
     incompatible: set[str] = set()
@@ -683,7 +756,7 @@ def discover_sources(project: Path, mcu: str | None = None) -> tuple[list[Path],
     if not linker_candidates:
         if mcu:
             log(f"No .ld found; generating linker script for {mcu}")
-            linker = generate_linker_script(project, mcu)
+            linker = generate_linker_script(project, mcu, flash_size_arg, ram_size_arg)
         else:
             raise SystemExit("No linker script (.ld) found. Pass --mcu to auto-generate one.")
     else:
@@ -721,7 +794,7 @@ def object_path(build_dir: Path, project: Path, source: Path) -> Path:
 
 
 def build_generated(project: Path, gcc: Path, mcu: str, family: str, args: argparse.Namespace, report: list[str]) -> Path:
-    c_sources, asm_sources, linker, startup = discover_sources(project, mcu)
+    c_sources, asm_sources, linker, startup = discover_sources(project, mcu, args.flash_size, args.ram_size)
     build_dir = project / "codex_build/build-gcc"
     project_name = args.project_name or project.name.replace(" ", "_")
     elf = build_dir / f"{project_name}.elf"
@@ -961,6 +1034,8 @@ def main() -> int:
     parser.add_argument("--project-name", help="output base name for generated builds")
     parser.add_argument("--make-target", help="target to pass to existing Makefile")
     parser.add_argument("--force-generated-build", action="store_true", help="ignore existing Makefile and generate GCC build")
+    parser.add_argument("--flash-size", default="", help="Flash size override, e.g. 0x100000")
+    parser.add_argument("--ram-size", default="", help="RAM size override, e.g. 0x20000")
     parser.add_argument("--gcc", help="path to arm-none-eabi-gcc")
     parser.add_argument("--openocd", help="path to openocd")
     args = parser.parse_args()

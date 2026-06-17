@@ -351,6 +351,12 @@ final class AppState: ObservableObject {
             if !settingsStore.openocdSpeed.isEmpty && settingsStore.openocdSpeed != "4000" {
                 args += ["--adapter-speed", settingsStore.openocdSpeed]
             }
+            if !settingsStore.stm32FlashSize.isEmpty {
+                args += ["--flash-size", settingsStore.stm32FlashSize]
+            }
+            if !settingsStore.stm32RamSize.isEmpty {
+                args += ["--ram-size", settingsStore.stm32RamSize]
+            }
         case .tiMSPM0:
             if !settingsStore.tiArmClangPath.isEmpty {
                 args += ["--cgt-root", settingsStore.tiArmClangPath]

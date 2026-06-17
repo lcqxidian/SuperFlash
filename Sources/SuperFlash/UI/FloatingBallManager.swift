@@ -25,6 +25,9 @@ final class FloatingBallManager: ObservableObject {
     var onBuild: (() -> Void)?
     var onBuildAndFlash: (() -> Void)?
     var onVerify: (() -> Void)?
+    var onSwitchProject: ((URL) -> Void)?
+    @Published var recentProjects: [ProjectInfo] = []
+    @Published var activeProjectURL: URL?
 
     private(set) var ballWindow: NSWindow?
     private weak var mainWindow: NSWindow?
@@ -88,7 +91,7 @@ final class FloatingBallManager: ObservableObject {
 
         // 强制重建 NSHostingView 的 rootView（@Published 在 NSHostingView 中不可靠）
         if let hostView = ballWindow?.contentView as? NSHostingView<FloatingBallContent> {
-            hostView.rootView = FloatingBallContent(manager: self, status: status, version: statusVersion)
+            hostView.rootView = FloatingBallContent(manager: self, status: status, version: statusVersion, recentProjects: recentProjects, activeProjectURL: activeProjectURL)
         }
 
         // 清除 layer 底色（之前调试加上的）
@@ -134,7 +137,7 @@ final class FloatingBallManager: ObservableObject {
     private func createBallWindow() {
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let window = NSWindow(
-            contentRect: NSRect(x: screenFrame.maxX - 320 - 20, y: screenFrame.minY + 40,
+            contentRect: NSRect(x: screenFrame.maxX - 320 - 60, y: screenFrame.maxY - 56 - 60,
                                 width: 320, height: 56),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false
@@ -149,7 +152,7 @@ final class FloatingBallManager: ObservableObject {
                   window.standardWindowButton(.miniaturizeButton),
                   window.standardWindowButton(.zoomButton)] { b?.isHidden = true }
 
-        let host = NSHostingView(rootView: FloatingBallContent(manager: self, status: status, version: statusVersion))
+        let host = NSHostingView(rootView: FloatingBallContent(manager: self, status: status, version: statusVersion, recentProjects: recentProjects, activeProjectURL: activeProjectURL))
         host.wantsLayer = true
         host.layer?.cornerRadius = 28
         host.layer?.masksToBounds = true
@@ -163,7 +166,7 @@ final class FloatingBallManager: ObservableObject {
             print("[rebuildBallHostView] SKIP: not a NSHostingView<FloatingBallContent>")
             return
         }
-        hostView.rootView = FloatingBallContent(manager: self, status: status, version: statusVersion)
+        hostView.rootView = FloatingBallContent(manager: self, status: status, version: statusVersion, recentProjects: recentProjects, activeProjectURL: activeProjectURL)
         print("[rebuildBallHostView] rootView updated, status=\(status)")
     }
 }
@@ -174,15 +177,30 @@ struct FloatingBallContent: View {
     @ObservedObject var manager: FloatingBallManager
     let status: BallStatus
     let version: UInt
+    let recentProjects: [ProjectInfo]
+    let activeProjectURL: URL?
     @State private var isHovered = false
     @State private var isAnimating = false
+    @State private var showProjectPicker = false
 
     var body: some View {
         HStack(spacing: 0) {
             HStack(spacing: 4) {
-                actionButton(icon: "hammer.fill", label: "编译", action: manager.onBuild)
-                actionButton(icon: "bolt.fill", label: "烧录", action: manager.onBuildAndFlash)
-                actionButton(icon: "antenna.radiowaves.left.and.right", label: "验证", action: manager.onVerify)
+                actionButton(icon: "hammer.fill", label: "编译", action: manager.onBuild).fixedSize()
+                actionButton(icon: "bolt.fill", label: "烧录", action: manager.onBuildAndFlash).fixedSize()
+                actionButton(icon: "folder", label: "切换项目", action: { showProjectPicker = true }).fixedSize()
+                .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
+                    ProjectPickerView(
+                        manager: manager,
+                        activeProjectURL: activeProjectURL,
+                        onSelect: { url in
+                            manager.onSwitchProject?(url)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                showProjectPicker = false
+                            }
+                        }
+                    )
+                }
             }
             .padding(.leading, 4)
             .padding(.trailing, 8)
@@ -313,6 +331,8 @@ struct FloatingBallContent: View {
 
     // MARK: - 进度环
 
+    // MARK: - 进度环
+
     private func progressTrack(color: Color) -> some View {
         Circle()
             .stroke(color.opacity(0.12), lineWidth: 3)
@@ -325,6 +345,60 @@ struct FloatingBallContent: View {
             .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
             .frame(width: 60, height: 60)
             .rotationEffect(.degrees(-90))
+    }
+}
+
+// MARK: - 项目切换弹窗
+
+struct ProjectPickerView: View {
+    @ObservedObject var manager: FloatingBallManager
+    let activeProjectURL: URL?
+    let onSelect: (URL) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("选择项目")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .foregroundColor(.secondary)
+
+            Divider()
+
+            if manager.recentProjects.isEmpty {
+                Text("暂无最近项目")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(12)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(manager.recentProjects) { project in
+                            Button { onSelect(project.rootURL) } label: {
+                                HStack(spacing: 8) {
+                                    Circle().fill(project.rootURL == manager.activeProjectURL ? Color.green : Color.clear)
+                                        .frame(width: 6, height: 6)
+                                    Image(systemName: project.vendor == .stm32 ? "cpu" : "microchip")
+                                        .foregroundColor(project.vendor == .stm32 ? .blue : .orange)
+                                        .font(.caption)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(project.displayName).font(.caption).lineLimit(1)
+                                        Text(project.vendor.displayName).font(.system(size: 9)).foregroundColor(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                            }
+                            .buttonStyle(.plain)
+                            Divider()
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+        .frame(width: 200)
+        .padding(.vertical, 4)
     }
 }
 
