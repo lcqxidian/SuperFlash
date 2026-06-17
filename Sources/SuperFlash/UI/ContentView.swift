@@ -27,6 +27,9 @@ struct ContentView: View {
         .sheet(isPresented: $appState.showSettings) {
             SettingsView(settingsStore: appState.settingsStore, isPresented: $appState.showSettings)
         }
+        .sheet(isPresented: $appState.showNewProject) {
+            NewProjectView(settingsStore: appState.settingsStore, isPresented: $appState.showNewProject)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .showSuperFlashSettings)) { _ in
             appState.openSettings()
         }
@@ -143,6 +146,9 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // 第一行：项目操作
             HStack(spacing: 10) {
+                ToolbarActionButton(title: "新建项目", icon: "plus.square", action: { appState.showNewProject = true })
+                    .help("创建新项目")
+
                 ToolbarActionButton(title: "选择项目", icon: "folder.badge.plus", action: appState.selectProject)
                     .help("选择嵌入式项目目录")
 

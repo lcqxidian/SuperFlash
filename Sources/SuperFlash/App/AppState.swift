@@ -21,6 +21,7 @@ final class AppState: ObservableObject {
     private var _runState: RunState = .idle
     @Published var logs: [LogEntry] = []
     @Published var showSettings = false
+    @Published var showNewProject = false
     @Published var buildProgress: Double = 0
 
     let detector = ProjectDetector()
