@@ -1,0 +1,14 @@
+.DS_Store
+.build/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.out
+codex_build/
+.build/
+xcuserdata/
+*.xcuserdata
+Package.resolved
