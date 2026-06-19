@@ -24,7 +24,30 @@ struct NewProjectView: View {
     @State private var showSuccessAlert = false
     @State private var createdProjectPath = ""
 
+    enum LibType: String, CaseIterable, Identifiable {
+        case stdperiph = "标准外设库 (StdPeriph)"
+        case hal      = "HAL 库"
+        case ll       = "LL 库"
+        case none     = "无（仅 CMSIS）"
+        var id: Self { self }
+    }
+
+    @State private var selectedLib: LibType = .stdperiph
+
     private var libraryName: String { "STM32Cube\(selectedFamily)" }
+
+    private func defaultModel(for family: String) -> String {
+        switch family {
+        case "F1": return "STM32F103C8"
+        case "F4": return "STM32F407ZG"
+        case "F7": return "STM32F767ZI"
+        case "H7": return "STM32H743XI"
+        case "G0": return "STM32G070KB"
+        case "G4": return "STM32G474RE"
+        case "L4": return "STM32L476RG"
+        default: return "STM32F407ZG"
+        }
+    }
 
     private var libraryReady: Bool {
         guard let path = libraryPath else { return false }
@@ -40,10 +63,15 @@ struct NewProjectView: View {
                             Text(f.display).tag(f.name)
                         }
                     }
-                    .onChange(of: selectedFamily) { _, _ in refreshLibraryPath() }
+                    .onChange(of: selectedFamily) { _, _ in
+                        chipModel = defaultModel(for: selectedFamily)
+                        refreshLibraryPath()
+                    }
                     HStack {
                         Text("型号").foregroundColor(.secondary)
-                        TextField("例 STM32F407ZG", text: $chipModel).textFieldStyle(.plain)
+                        Text(chipModel).font(.callout).foregroundColor(.primary)
+                        Spacer()
+                        Text("自动匹配").font(.caption).foregroundColor(.secondary)
                     }
                 } header: {
                     Label("选择芯片", systemImage: "cpu")
@@ -107,6 +135,20 @@ struct NewProjectView: View {
                 } header: {
                     Label("芯片支持包", systemImage: "shippingbox")
                 }
+
+                Section {
+                    Picker("外设库", selection: $selectedLib) {
+                        ForEach(LibType.allCases) { t in
+                            Text(t.rawValue).tag(t)
+                        }
+                    }
+                    Text(selectedLib == .stdperiph ? "传统 StdPeriph API（如 GPIO_Init），仅 F4 内置" :
+                         selectedLib == .none ? "仅 CMSIS 头文件，寄存器操作" :
+                         "从芯片包复制 HAL/LL 驱动，需已下载芯片包")
+                        .font(.caption).foregroundColor(.secondary)
+                } header: {
+                    Label("外设驱动库", systemImage: "book")
+                }
             }
             .navigationTitle("新建 STM32 项目")
             .toolbar {
@@ -130,6 +172,7 @@ struct NewProjectView: View {
             }
             .frame(width: 520, height: 400)
             .onAppear {
+                chipModel = defaultModel(for: selectedFamily)
                 if let saved = UserDefaults.standard.string(forKey: "newProjectLocation") {
                     projectLocation = URL(fileURLWithPath: saved)
                 }
@@ -181,48 +224,129 @@ struct NewProjectView: View {
         libraryPath = url
     }
 
+    /// 用 URLSession download API 下载到文件，系统级下载更可靠。
+    private func downloadToFile(request: URLRequest, to zipPath: URL) async throws {
+        let fm = FileManager.default
+        let (tempURL, response) = try await URLSession.shared.download(for: request)
+
+        guard let httpResp = response as? HTTPURLResponse else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "非 HTTP 响应"])
+        }
+        guard httpResp.statusCode == 200 else {
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResp.statusCode)"])
+        }
+
+        try? fm.removeItem(at: zipPath)
+        try fm.moveItem(at: tempURL, to: zipPath)
+
+        // 用 unzip -t 校验 ZIP 完整性（不解压，只测试）
+        let test = Process()
+        test.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        test.arguments = ["-tq", zipPath.path]
+        try test.run()
+        test.waitUntilExit()
+        guard test.terminationStatus == 0 else {
+            let size = (try? fm.attributesOfItem(atPath: zipPath.path))?[.size] as? Int64 ?? 0
+            try? fm.removeItem(at: zipPath)
+            throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "ZIP 校验失败（\(size/1_000_000)MB，下载不完整）"])
+        }
+    }
+
+    /// 尝试从一组 URL 下载芯片包，直到成功或全部失败
+    @MainActor
+    private func downloadFromURLs(_ urls: [URL], repoName: String, tmp: URL) async throws {
+        let fm = FileManager.default
+        var lastError: Error?
+
+        for (i, url) in urls.enumerated() {
+            statusMessage = "正在下载（尝试 \(i+1)/\(urls.count)）..."
+            var request = URLRequest(url: url)
+            request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+            request.setValue("application/zip,application/octet-stream,*/*", forHTTPHeaderField: "Accept")
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+
+            let zipPath = tmp.appendingPathComponent("\(repoName).zip")
+            do {
+                try await downloadToFile(request: request, to: zipPath)
+                return // 成功
+            } catch {
+                lastError = error
+                try? fm.removeItem(at: zipPath)
+                continue
+            }
+        }
+        throw lastError ?? NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "所有下载地址均失败"])
+    }
+
     @MainActor
     private func downloadPackage() async {
-        let repo = families.first(where: { $0.name == selectedFamily })!.repo
-        let dest = URL(fileURLWithPath: NSHomeDirectory() + "/Desktop/\(repo)")
-        let zipPath = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("\(repo).zip")
+        let repoName = families.first(where: { $0.name == selectedFamily })!.repo
+        let dest = URL(fileURLWithPath: NSHomeDirectory() + "/Desktop/\(repoName)")
+        let zipDest = URL(fileURLWithPath: NSHomeDirectory() + "/Desktop/\(repoName).zip")
+        let tmp = URL(fileURLWithPath: "/tmp/superflash_dl")
+        let fm = FileManager.default
 
-        // 如果已经下载过了
-        if FileManager.default.fileExists(atPath: dest.appendingPathComponent("Drivers/CMSIS").path) {
-            libraryPath = dest
-            return
+        // 如果已经解压好了
+        if fm.fileExists(atPath: dest.appendingPathComponent("Drivers/CMSIS").path) { libraryPath = dest; return }
+        // 如果 zip 已经存在，提示解压
+        if fm.fileExists(atPath: zipDest.path) {
+            statusMessage = "\(repoName).zip 已存在，解压到桌面后点击「选择文件夹」"
+            isBusy = false; return
         }
 
         isBusy = true
-        statusMessage = "正在下载 \(repo)（约 150MB）..."
-        let url = URL(string: "https://github.com/STMicroelectronics/\(repo)/archive/refs/heads/master.zip")!
+        statusMessage = "正在下载 \(repoName)..."
+
+        let base = "https://github.com/STMicroelectronics/\(repoName)"
+        let urls = [
+            URL(string: "\(base)/archive/refs/heads/master.zip")!,
+            URL(string: "\(base)/archive/master.zip")!,
+            URL(string: "\(base)/archive/refs/heads/main.zip")!,
+        ]
+
         do {
-            var request = URLRequest(url: url)
-            request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-            let (data, _) = try await URLSession.shared.data(for: request)
-            try data.write(to: zipPath)
-            statusMessage = "正在解压..."
-            let unzip = Process()
-            unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            unzip.arguments = ["-o", zipPath.path, "-d", NSTemporaryDirectory()]
-            try unzip.run()
-            unzip.waitUntilExit()
-            try FileManager.default.removeItem(at: zipPath)
-            // 移动解压后的文件夹到桌面
-            let extracted = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("\(repo)-master")
-            if FileManager.default.fileExists(atPath: extracted.path) {
-                try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.moveItem(at: extracted, to: dest)
+            // 下载到 tmp，最多重试 3 次
+            var lastError: Error?
+            for attempt in 1...3 {
+                if attempt > 1 {
+                    statusMessage = "重试中（第 \(attempt)/3 次）..."
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+                do {
+                    // 清理 tmp
+                    try? fm.removeItem(at: tmp)
+                    try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+                    // 下载
+                    try await downloadFromURLs(urls, repoName: repoName, tmp: tmp)
+                    lastError = nil; break
+                } catch {
+                    lastError = error
+                }
             }
-            statusMessage = "下载完成！"
-            refreshLibraryPath()
+            if let err = lastError { throw err }
+
+            // 确认 zip 文件有效
+            let zipPath = tmp.appendingPathComponent("\(repoName).zip")
+            let attrs = try fm.attributesOfItem(atPath: zipPath.path)
+            let fileSize = (attrs[.size] as? Int64) ?? 0
+            guard fileSize > 1_000_000 else {
+                throw NSError(domain: "", code: -1, userInfo: [NSLocalizedDescriptionKey: "下载文件过小（\(fileSize/1_000_000)MB），请检查网络后重试"])
+            }
+
+            // 复制到桌面
+            try? fm.removeItem(at: zipDest)
+            try fm.copyItem(at: zipPath, to: zipDest)
+            try? fm.removeItem(at: tmp)
+
+            libraryPath = nil
+            statusMessage = "已下载到桌面 \(repoName).zip，请解压后点击「选择文件夹」"
+
         } catch {
             statusMessage = "下载失败：\(error.localizedDescription)"
         }
         isBusy = false
     }
 
-    @MainActor
     private func createProject() async {
         guard let location = projectLocation, !projectName.isEmpty else { return }
         isBusy = true
@@ -233,43 +357,92 @@ struct NewProjectView: View {
             try fm.createDirectory(at: projectDir.appendingPathComponent("USER"), withIntermediateDirectories: true)
             try fm.createDirectory(at: projectDir.appendingPathComponent("DRIVE/FWLib/src"), withIntermediateDirectories: true)
             try fm.createDirectory(at: projectDir.appendingPathComponent("DRIVE/FWLib/inc"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: projectDir.appendingPathComponent("DRIVE/CMSIS"), withIntermediateDirectories: true)
 
             // 从芯片包复制 CMSIS 头文件
             if let lib = libraryPath {
                 let drivers = lib.appendingPathComponent("Drivers")
-                // 复制核心头文件
+                // 复制 CMSIS Core 头文件（全部）
                 let cmsisCore = drivers.appendingPathComponent("CMSIS/Core/Include")
                 if fm.fileExists(atPath: cmsisCore.path) {
                     let files = (try? fm.contentsOfDirectory(at: cmsisCore, includingPropertiesForKeys: nil)) ?? []
-                    for f in files where f.lastPathComponent.hasPrefix("core_") || f.lastPathComponent.hasPrefix("cmsis_") {
+                    for f in files {
                         try? fm.copyItem(atPath: f.path, toPath: projectDir.appendingPathComponent("DRIVE/CMSIS/\(f.lastPathComponent)").path)
                     }
                 }
-                // 搜索设备头文件目录（各芯片系列路径不同）
-                let deviceST = drivers.appendingPathComponent("CMSIS/Device/ST")
-                if fm.fileExists(atPath: deviceST.path) {
-                    let devFamilies = (try? fm.contentsOfDirectory(at: deviceST, includingPropertiesForKeys: nil)) ?? []
-                    for fam in devFamilies {
-                        let inc = fam.appendingPathComponent("Include")
-                        if fm.fileExists(atPath: inc.path) {
-                            let files = (try? fm.contentsOfDirectory(at: inc, includingPropertiesForKeys: nil)) ?? []
-                            for f in files where f.lastPathComponent.hasPrefix("stm32") || f.lastPathComponent.hasPrefix("system_stm32") {
-                                try? fm.copyItem(atPath: f.path, toPath: projectDir.appendingPathComponent("DRIVE/CMSIS/\(f.lastPathComponent)").path)
+                // 搜索芯片包中的系统文件 + 设备头文件
+                let family = chipModel.replacingOccurrences(of: "STM32", with: "").dropLast(4).lowercased()
+                let sysBase = "stm32\(family)xx"
+                let sysFiles = (try? fm.subpathsOfDirectory(atPath: lib.path).filter {
+                    $0.hasSuffix("/system_\(sysBase).c") || $0.hasSuffix("/\(sysBase).h")
+                }) ?? []
+                for sf in sysFiles {
+                    let name = URL(fileURLWithPath: sf).lastPathComponent
+                    try? fm.copyItem(atPath: lib.appendingPathComponent(sf).path,
+                                     toPath: projectDir.appendingPathComponent("DRIVE/CMSIS/\(name)").path)
+                }
+            }
+
+            // 如果设备头文件没复制到，用内置的系列特定文件
+            let familyMap = ["f1":"CMSIS_F1", "f4":"CMSIS", "f7":"CMSIS_F7", "h7":"CMSIS_H7"]
+            let chipLower = chipModel.lowercased()
+            for (key, bundleDir) in familyMap {
+                if chipLower.contains("stm32\(key)") {
+                    if let src = Bundle.main.resourceURL?.appendingPathComponent(bundleDir) {
+                        let files = (try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)) ?? []
+                        for f in files {
+                            let dst = projectDir.appendingPathComponent("DRIVE/CMSIS/\(f.lastPathComponent)")
+                            if !fm.fileExists(atPath: dst.path) {
+                                try? fm.copyItem(atPath: f.path, toPath: dst.path)
+                            }
+                        }
+                    }
+                    break
+                }
+            }
+
+            // 按选择复制外设库
+            switch selectedLib {
+            case .stdperiph:
+                let skipStdperiph = Set(["stm32f4xx_it.c", "stm32f4xx_it.h"])
+                if let fwlibSrc = Bundle.main.resourceURL?.appendingPathComponent("FWLib") {
+                    for dir in ["inc", "src"] {
+                        let srcDir = fwlibSrc.appendingPathComponent(dir)
+                        if let files = try? fm.contentsOfDirectory(at: srcDir, includingPropertiesForKeys: nil) {
+                            for f in files where !skipStdperiph.contains(f.lastPathComponent) {
+                                try? fm.copyItem(atPath: f.path,
+                                    toPath: projectDir.appendingPathComponent("DRIVE/FWLib/\(dir)/\(f.lastPathComponent)").path)
+                            }
+                        }
+                    }
+                    let conf = fwlibSrc.appendingPathComponent("stm32f4xx_conf.h")
+                    if fm.fileExists(atPath: conf.path) {
+                        try? fm.copyItem(atPath: conf.path,
+                            toPath: projectDir.appendingPathComponent("DRIVE/FWLib/stm32f4xx_conf.h").path)
+                    }
+                }
+            case .hal, .ll:
+                if let lib = libraryPath {
+                    let family = chipModel.replacingOccurrences(of: "STM32", with: "").dropLast(4)
+                    let halDir = lib.appendingPathComponent("Drivers/STM32\(family)_HAL_Driver")
+                    if fm.fileExists(atPath: halDir.path) {
+                        for dir in ["Inc", "Src"] {
+                            let srcDir = halDir.appendingPathComponent(dir)
+                            guard let files = try? fm.contentsOfDirectory(at: srcDir, includingPropertiesForKeys: nil) else { continue }
+                            for f in files {
+                                if selectedLib == .ll && !f.lastPathComponent.contains("_ll_") { continue }
+                                try? fm.copyItem(atPath: f.path,
+                                    toPath: projectDir.appendingPathComponent("DRIVE/FWLib/\(dir.lowercased())/\(f.lastPathComponent)").path)
                             }
                         }
                     }
                 }
+            case .none:
+                break
             }
 
-            // main.c 模板，自动适配芯片系列
-            let chipHeader = chipModel.lowercased().contains("stm32f1") ? "stm32f1xx.h" :
-                             chipModel.lowercased().contains("stm32f7") ? "stm32f7xx.h" :
-                             chipModel.lowercased().contains("stm32h7") ? "stm32h7xx.h" :
-                             chipModel.lowercased().contains("stm32g0") ? "stm32g0xx.h" :
-                             chipModel.lowercased().contains("stm32g4") ? "stm32g4xx.h" :
-                             chipModel.lowercased().contains("stm32l4") ? "stm32l4xx.h" : "stm32f4xx.h"
+            // main.c 模板
             let template = """
-            #include "\(chipHeader)"
 
             int main(void) {
                 while (1) {
@@ -281,6 +454,9 @@ struct NewProjectView: View {
 
             """
             try template.write(to: URL(fileURLWithPath: projectDir.appendingPathComponent("USER/main.c").path), atomically: true, encoding: .utf8)
+
+            // 保存芯片型号，供构建脚本检测
+            try chipModel.write(to: projectDir.appendingPathComponent("DRIVE/stm32_mcu"), atomically: true, encoding: .utf8)
 
             createdProjectPath = projectDir.path
             isBusy = false

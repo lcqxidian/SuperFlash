@@ -128,6 +128,11 @@ def looks_like_stm32(project: Path) -> bool:
 def detect_mcu(project: Path, override: str | None) -> str:
     if override:
         return normalize_mcu(override)
+    mcu_file = project / "DRIVE" / "stm32_mcu"
+    if mcu_file.is_file():
+        mcu = mcu_file.read_text(encoding="utf-8").strip()
+        if mcu:
+            return normalize_mcu(mcu)
     search_files: list[Path] = []
     search_files.extend(project.glob("*.ioc"))
     search_files.extend(project.glob("**/*.ld"))
@@ -445,20 +450,32 @@ SECTIONS
 
 
 def generate_startup_file(project: Path, mcu: str) -> Path:
-    """Generate a GCC-compatible startup file when the project has Keil/ARMCC syntax startup."""
-    startup_dir = project / "codex_build"
-    startup_dir.mkdir(parents=True, exist_ok=True)
-    startup_path = startup_dir / "startup_stm32f40xx_gcc.s"
+    """Generate a GCC-compatible startup file when none exists."""
+    family = family_from_mcu(mcu)
+    mcu_lower = mcu.lower()
+    startup_path = project / "codex_build" / f"startup_{mcu_lower}_gcc.s"
+    startup_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Standard STM32F40x interrupt vector table in GNU AS syntax
-    # 注意：F4 有 Flash alias（0x00000000 映射到 0x08000000）
-    # .data 复制必须从 alias 地址读取，否则 D-bus 可能触发总线错误
-    content = """\
-/* Auto-generated GCC startup file for STM32F4xx */
+    # CPU / FPU 按系列配置
+    cpu_fpu = {
+        "f1":  (".cpu cortex-m3\n",       ""),
+        "f4":  (".cpu cortex-m4\n",       ".fpu fpv4-sp-d16\n"),
+        "f7":  (".cpu cortex-m7\n",       ".fpu fpv5-sp-d16\n"),
+        "h7":  (".cpu cortex-m7\n",       ".fpu fpv5-d16\n"),
+        "g0":  (".cpu cortex-m0plus\n",   ""),
+        "g4":  (".cpu cortex-m4\n",       ".fpu fpv4-sp-d16\n"),
+        "l4":  (".cpu cortex-m4\n",       ".fpu fpv4-sp-d16\n"),
+        "l0":  (".cpu cortex-m0plus\n",   ""),
+        "f0":  (".cpu cortex-m0\n",       ""),
+        "f2":  (".cpu cortex-m3\n",       ""),
+        "f3":  (".cpu cortex-m4\n",       ".fpu fpv4-sp-d16\n"),
+    }
+    cpu_line, fpu_line = cpu_fpu.get(family, (".cpu cortex-m4\n", ".fpu fpv4-sp-d16\n"))
+
+    content = f"""\
+/* Auto-generated GCC startup file for {mcu} */
 .syntax unified
-.cpu cortex-m4
-.fpu fpv4-sp-d16
-.thumb
+{cpu_line}{fpu_line}.thumb
 
 .global g_pfnVectors
 .global Default_Handler
@@ -483,89 +500,10 @@ g_pfnVectors:
   .word 0
   .word PendSV_Handler
   .word SysTick_Handler
-  /* External interrupts */
-  .word WWDG_IRQHandler
-  .word PVD_IRQHandler
-  .word TAMP_STAMP_IRQHandler
-  .word RTC_WKUP_IRQHandler
-  .word FLASH_IRQHandler
-  .word RCC_IRQHandler
-  .word EXTI0_IRQHandler
-  .word EXTI1_IRQHandler
-  .word EXTI2_IRQHandler
-  .word EXTI3_IRQHandler
-  .word EXTI4_IRQHandler
-  .word DMA1_Stream0_IRQHandler
-  .word DMA1_Stream1_IRQHandler
-  .word DMA1_Stream2_IRQHandler
-  .word DMA1_Stream3_IRQHandler
-  .word DMA1_Stream4_IRQHandler
-  .word DMA1_Stream5_IRQHandler
-  .word DMA1_Stream6_IRQHandler
-  .word ADC_IRQHandler
-  .word CAN1_TX_IRQHandler
-  .word CAN1_RX0_IRQHandler
-  .word CAN1_RX1_IRQHandler
-  .word CAN1_SCE_IRQHandler
-  .word EXTI9_5_IRQHandler
-  .word TIM1_BRK_TIM9_IRQHandler
-  .word TIM1_UP_TIM10_IRQHandler
-  .word TIM1_TRG_COM_TIM11_IRQHandler
-  .word TIM1_CC_IRQHandler
-  .word TIM2_IRQHandler
-  .word TIM3_IRQHandler
-  .word TIM4_IRQHandler
-  .word I2C1_EV_IRQHandler
-  .word I2C1_ER_IRQHandler
-  .word I2C2_EV_IRQHandler
-  .word I2C2_ER_IRQHandler
-  .word SPI1_IRQHandler
-  .word SPI2_IRQHandler
-  .word USART1_IRQHandler
-  .word USART2_IRQHandler
-  .word USART3_IRQHandler
-  .word EXTI15_10_IRQHandler
-  .word RTC_Alarm_IRQHandler
-  .word OTG_FS_WKUP_IRQHandler
-  .word TIM8_BRK_TIM12_IRQHandler
-  .word TIM8_UP_TIM13_IRQHandler
-  .word TIM8_TRG_COM_TIM14_IRQHandler
-  .word TIM8_CC_IRQHandler
-  .word DMA1_Stream7_IRQHandler
-  .word FSMC_IRQHandler
-  .word SDIO_IRQHandler
-  .word TIM5_IRQHandler
-  .word SPI3_IRQHandler
-  .word UART4_IRQHandler
-  .word UART5_IRQHandler
-  .word TIM6_DAC_IRQHandler
-  .word TIM7_IRQHandler
-  .word DMA2_Stream0_IRQHandler
-  .word DMA2_Stream1_IRQHandler
-  .word DMA2_Stream2_IRQHandler
-  .word DMA2_Stream3_IRQHandler
-  .word DMA2_Stream4_IRQHandler
-  .word ETH_IRQHandler
-  .word ETH_WKUP_IRQHandler
-  .word CAN2_TX_IRQHandler
-  .word CAN2_RX0_IRQHandler
-  .word CAN2_RX1_IRQHandler
-  .word CAN2_SCE_IRQHandler
-  .word OTG_FS_IRQHandler
-  .word DMA2_Stream5_IRQHandler
-  .word DMA2_Stream6_IRQHandler
-  .word DMA2_Stream7_IRQHandler
-  .word USART6_IRQHandler
-  .word I2C3_EV_IRQHandler
-  .word I2C3_ER_IRQHandler
-  .word OTG_HS_EP1_OUT_IRQHandler
-  .word OTG_HS_EP1_IN_IRQHandler
-  .word OTG_HS_WKUP_IRQHandler
-  .word OTG_HS_IRQHandler
-  .word DCMI_IRQHandler
-  .word CRYP_IRQHandler
-  .word HASH_RNG_IRQHandler
-  .word FPU_IRQHandler
+  /* External interrupts — weak default handlers */
+  .rept 240
+  .word Default_Handler
+  .endr
 .size g_pfnVectors, . - g_pfnVectors
 
 /* === Reset Handler === */
@@ -573,34 +511,20 @@ g_pfnVectors:
 .type Reset_Handler, %function
 .thumb_func
 Reset_Handler:
-  /* 设置栈指针 */
   ldr r1, =_estack
   mov sp, r1
-
-  /* 配置 Flash 等待周期（F4 @168MHz 需 5WS + PRFTEN + ICEN + DCEN） */
-  movw r0, #0x0705
-  movw r1, #0x3C00
-  movt r1, #0x4002
-  str r0, [r1]
-
-  /* .data 复制：从 Flash（alias 地址）复制到 SRAM */
-  /* F4 的 Flash alias：0x00000000 映射到 0x08000000 */
-  /* 从 D-bus 读 0x0800xxxx 可能触发总线错误，必须从 alias 读 */
+  /* .data 复制到 SRAM */
   ldr r1, =_sidata
   ldr r2, =_sdata
   ldr r3, =_edata
   subs r3, r2
   ble .L_clear_bss
-  /* _sidata 是 0x0800xxxx，减去 0x08000000 得到 alias 地址 0x0000xxxx */
-  ldr r0, =0x08000000
-  subs r1, r0
 .L_copy_data:
   ldrb r0, [r1], #1
   strb r0, [r2], #1
   subs r3, #1
   bne .L_copy_data
-
-  /* 清零 .bss */
+  /* .bss 清零 */
 .L_clear_bss:
   ldr r1, =_sbss
   ldr r2, =_ebss
@@ -611,11 +535,19 @@ Reset_Handler:
   strb r0, [r1], #1
   subs r2, #1
   bne .L_zero_bss
-
 .L_call_system_init:
   bl SystemInit
   bl main
   b .
+
+/* === 弱定义 SystemInit（用户如有 system_stm32xxx.c 会覆盖） === */
+.section .text.SystemInit,"ax",%progbits
+.global SystemInit
+.weak SystemInit
+.type SystemInit, %function
+.thumb_func
+SystemInit:
+  bx lr
 
 /* === 异常处理程序 === */
 .macro DEF_IRQ name
@@ -636,88 +568,7 @@ DEF_IRQ SVC_Handler
 DEF_IRQ DebugMon_Handler
 DEF_IRQ PendSV_Handler
 DEF_IRQ SysTick_Handler
-DEF_IRQ WWDG_IRQHandler
-DEF_IRQ PVD_IRQHandler
-DEF_IRQ TAMP_STAMP_IRQHandler
-DEF_IRQ RTC_WKUP_IRQHandler
-DEF_IRQ FLASH_IRQHandler
-DEF_IRQ RCC_IRQHandler
-DEF_IRQ EXTI0_IRQHandler
-DEF_IRQ EXTI1_IRQHandler
-DEF_IRQ EXTI2_IRQHandler
-DEF_IRQ EXTI3_IRQHandler
-DEF_IRQ EXTI4_IRQHandler
-DEF_IRQ DMA1_Stream0_IRQHandler
-DEF_IRQ DMA1_Stream1_IRQHandler
-DEF_IRQ DMA1_Stream2_IRQHandler
-DEF_IRQ DMA1_Stream3_IRQHandler
-DEF_IRQ DMA1_Stream4_IRQHandler
-DEF_IRQ DMA1_Stream5_IRQHandler
-DEF_IRQ DMA1_Stream6_IRQHandler
-DEF_IRQ ADC_IRQHandler
-DEF_IRQ CAN1_TX_IRQHandler
-DEF_IRQ CAN1_RX0_IRQHandler
-DEF_IRQ CAN1_RX1_IRQHandler
-DEF_IRQ CAN1_SCE_IRQHandler
-DEF_IRQ EXTI9_5_IRQHandler
-DEF_IRQ TIM1_BRK_TIM9_IRQHandler
-DEF_IRQ TIM1_UP_TIM10_IRQHandler
-DEF_IRQ TIM1_TRG_COM_TIM11_IRQHandler
-DEF_IRQ TIM1_CC_IRQHandler
-DEF_IRQ TIM2_IRQHandler
-DEF_IRQ TIM3_IRQHandler
-DEF_IRQ TIM4_IRQHandler
-DEF_IRQ I2C1_EV_IRQHandler
-DEF_IRQ I2C1_ER_IRQHandler
-DEF_IRQ I2C2_EV_IRQHandler
-DEF_IRQ I2C2_ER_IRQHandler
-DEF_IRQ SPI1_IRQHandler
-DEF_IRQ SPI2_IRQHandler
-DEF_IRQ USART1_IRQHandler
-DEF_IRQ USART2_IRQHandler
-DEF_IRQ USART3_IRQHandler
-DEF_IRQ EXTI15_10_IRQHandler
-DEF_IRQ RTC_Alarm_IRQHandler
-DEF_IRQ OTG_FS_WKUP_IRQHandler
-DEF_IRQ TIM8_BRK_TIM12_IRQHandler
-DEF_IRQ TIM8_UP_TIM13_IRQHandler
-DEF_IRQ TIM8_TRG_COM_TIM14_IRQHandler
-DEF_IRQ TIM8_CC_IRQHandler
-DEF_IRQ DMA1_Stream7_IRQHandler
-DEF_IRQ FSMC_IRQHandler
-DEF_IRQ SDIO_IRQHandler
-DEF_IRQ TIM5_IRQHandler
-DEF_IRQ SPI3_IRQHandler
-DEF_IRQ UART4_IRQHandler
-DEF_IRQ UART5_IRQHandler
-DEF_IRQ TIM6_DAC_IRQHandler
-DEF_IRQ TIM7_IRQHandler
-DEF_IRQ DMA2_Stream0_IRQHandler
-DEF_IRQ DMA2_Stream1_IRQHandler
-DEF_IRQ DMA2_Stream2_IRQHandler
-DEF_IRQ DMA2_Stream3_IRQHandler
-DEF_IRQ DMA2_Stream4_IRQHandler
-DEF_IRQ ETH_IRQHandler
-DEF_IRQ ETH_WKUP_IRQHandler
-DEF_IRQ CAN2_TX_IRQHandler
-DEF_IRQ CAN2_RX0_IRQHandler
-DEF_IRQ CAN2_RX1_IRQHandler
-DEF_IRQ CAN2_SCE_IRQHandler
-DEF_IRQ OTG_FS_IRQHandler
-DEF_IRQ DMA2_Stream5_IRQHandler
-DEF_IRQ DMA2_Stream6_IRQHandler
-DEF_IRQ DMA2_Stream7_IRQHandler
-DEF_IRQ USART6_IRQHandler
-DEF_IRQ I2C3_EV_IRQHandler
-DEF_IRQ I2C3_ER_IRQHandler
-DEF_IRQ OTG_HS_EP1_OUT_IRQHandler
-DEF_IRQ OTG_HS_EP1_IN_IRQHandler
-DEF_IRQ OTG_HS_WKUP_IRQHandler
-DEF_IRQ OTG_HS_IRQHandler
-DEF_IRQ DCMI_IRQHandler
-DEF_IRQ CRYP_IRQHandler
-DEF_IRQ HASH_RNG_IRQHandler
-DEF_IRQ FPU_IRQHandler
+DEF_IRQ Default_Handler
 """
     startup_path.write_text(content, encoding="utf-8")
     log(f"Generated GCC startup file: {startup_path}")
@@ -763,7 +614,9 @@ def discover_sources(project: Path, mcu: str | None = None, flash_size_arg: str 
         linker = sorted(linker_candidates, key=lambda p: (len(p.parts), p.name))[0].resolve()
     startup_candidates = [p for p in asm_sources if "startup_stm32" in p.name.lower()]
     if not startup_candidates:
-        raise SystemExit("No startup_stm32*.s file found.")
+        startup = generate_startup_file(project, mcu)
+        asm_sources.insert(0, startup)
+        return c_sources, asm_sources, linker, startup
     orig_startup = sorted(startup_candidates, key=lambda p: (len(p.parts), p.name))[0].resolve()
     if is_armcc_syntax(orig_startup) and mcu:
         log(f"Startup file {orig_startup.name} uses ARMCC syntax; generating GCC-compatible version")

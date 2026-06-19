@@ -414,7 +414,7 @@ static void SystemInit_ExtMemCtl(void);
   * @param  None
   * @retval None
   */
-__attribute__((weak)) void SystemInit(void)
+void SystemInit(void)
 {
   /* FPU settings ------------------------------------------------------------*/
   #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
