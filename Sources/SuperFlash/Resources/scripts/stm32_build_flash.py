@@ -143,13 +143,13 @@ def detect_mcu(project: Path, override: str | None) -> str:
     for path in search_files[:300]:
         haystack = path.name + "\n" + read_text(path)[:10000]
         match = re.search(r"STM32[A-Z]\d{3}[A-Z0-9]{0,8}", haystack, re.IGNORECASE)
-        if match:
+        if match and not match.group(0).lower().endswith("xx"):
             return normalize_mcu(match.group(0))
         match = re.search(r"STM32F40_41xxx|STM32F4xx|STM32F10X_[A-Z_]+|STM32H7xx|STM32F7xx|STM32G4xx|STM32L4xx", haystack)
         if match:
             return normalize_mcu(match.group(0))
     name_match = re.search(r"STM32[A-Z]\d{3}[A-Z0-9]{0,8}", str(project), re.IGNORECASE)
-    if name_match:
+    if name_match and not name_match.group(0).lower().endswith("xx"):
         return normalize_mcu(name_match.group(0))
     raise SystemExit("Could not detect STM32 MCU. Pass --mcu, for example --mcu STM32F407ZG.")
 
@@ -472,8 +472,91 @@ def generate_startup_file(project: Path, mcu: str) -> Path:
     }
     cpu_line, fpu_line = cpu_fpu.get(family, (".cpu cortex-m4\n", ".fpu fpv4-sp-d16\n"))
 
+    # 各系列外部中断名称（向量表项 16+ 对应）
+    exti_irqs: dict[str, list[str]] = {
+        "f4": [
+            "WWDG", "PVD", "TAMP_STAMP", "RTC_WKUP", "FLASH", "RCC",
+            "EXTI0", "EXTI1", "EXTI2", "EXTI3", "EXTI4",
+            "DMA1_Stream0", "DMA1_Stream1", "DMA1_Stream2", "DMA1_Stream3", "DMA1_Stream4",
+            "DMA1_Stream5", "DMA1_Stream6", "ADC",
+            "CAN1_TX", "CAN1_RX0", "CAN1_RX1", "CAN1_SCE",
+            "EXTI9_5", "TIM1_BRK_TIM9", "TIM1_UP_TIM10", "TIM1_TRG_COM_TIM11", "TIM1_CC",
+            "TIM2", "TIM3", "TIM4",
+            "I2C1_EV", "I2C1_ER", "I2C2_EV", "I2C2_ER",
+            "SPI1", "SPI2", "USART1", "USART2", "USART3",
+            "EXTI15_10", "RTC_Alarm", "OTG_FS_WKUP",
+            "TIM8_BRK_TIM12", "TIM8_UP_TIM13", "TIM8_TRG_COM_TIM14", "TIM8_CC",
+            "DMA1_Stream7", "FSMC", "SDIO", "TIM5", "SPI3", "UART4", "UART5",
+            "TIM6_DAC", "TIM7", "DMA2_Stream0", "DMA2_Stream1", "DMA2_Stream2",
+            "DMA2_Stream3", "DMA2_Stream4", "ETH", "ETH_WKUP",
+            "CAN2_TX", "CAN2_RX0", "CAN2_RX1", "CAN2_SCE",
+            "OTG_FS", "DMA2_Stream5", "DMA2_Stream6", "DMA2_Stream7",
+            "USART6", "I2C3_EV", "I2C3_ER",
+            "OTG_HS_EP1_OUT", "OTG_HS_EP1_IN", "OTG_HS_WKUP", "OTG_HS",
+            "DCMI", "CRYP", "HASH_RNG", "FPU",
+        ],
+        "f1": [ "WWDG", "PVD", "TAMPER", "RTC", "FLASH", "RCC", "EXTI0",
+            "EXTI1", "EXTI2", "EXTI3", "EXTI4", "DMA1_Channel0", "DMA1_Channel1",
+            "DMA1_Channel2", "DMA1_Channel3", "DMA1_Channel4", "DMA1_Channel5",
+            "DMA1_Channel6", "ADC1_2", "USB_HP_CAN1_TX", "USB_LP_CAN1_RX0",
+            "CAN1_RX1", "CAN1_SCE", "EXTI9_5", "TIM1_BRK", "TIM1_UP",
+            "TIM1_TRG_COM", "TIM1_CC", "TIM2", "TIM3", "TIM4",
+            "I2C1_EV", "I2C1_ER", "I2C2_EV", "I2C2_ER",
+            "SPI1", "SPI2", "USART1", "USART2", "USART3",
+            "EXTI15_10", "RTCAlarm", "USBWakeUp",
+        ],
+        "f7": [ "WWDG", "PVD", "TAMP_STAMP", "RTC_WKUP", "FLASH", "RCC",
+            "EXTI0", "EXTI1", "EXTI2", "EXTI3", "EXTI4",
+            "DMA1_Stream0", "DMA1_Stream1", "DMA1_Stream2", "DMA1_Stream3",
+            "DMA1_Stream4", "DMA1_Stream5", "DMA1_Stream6", "ADC",
+            "CAN1_TX", "CAN1_RX0", "CAN1_RX1", "CAN1_SCE",
+            "EXTI9_5", "TIM1_BRK_TIM9", "TIM1_UP_TIM10", "TIM1_TRG_COM_TIM11",
+            "TIM1_CC", "TIM2", "TIM3", "TIM4", "I2C1_EV", "I2C1_ER",
+            "I2C2_EV", "I2C2_ER", "SPI1", "SPI2",
+            "USART1", "USART2", "USART3", "EXTI15_10", "RTC_Alarm",
+            "OTG_FS_WKUP", "TIM8_BRK_TIM12", "TIM8_UP_TIM13", "TIM8_TRG_COM_TIM14",
+            "TIM8_CC", "DMA1_Stream7", "FMC", "SDIO", "TIM5", "SPI3",
+            "UART4", "UART5", "TIM6_DAC", "TIM7", "DMA2_Stream0",
+            "DMA2_Stream1", "DMA2_Stream2", "DMA2_Stream3", "DMA2_Stream4",
+            "ETH", "ETH_WKUP", "CAN2_TX", "CAN2_RX0", "CAN2_RX1", "CAN2_SCE",
+            "OTG_FS", "DMA2_Stream5", "DMA2_Stream6", "DMA2_Stream7",
+            "USART6", "I2C3_EV", "I2C3_ER", "OTG_HS_EP1_OUT", "OTG_HS_EP1_IN",
+            "OTG_HS_WKUP", "OTG_HS", "DCMI", "CRYP", "HASH_RNG", "FPU",
+        ],
+        "h7": [ "WWDG", "PVD", "TAMP_STAMP", "RTC_WKUP", "FLASH", "RCC",
+            "EXTI0", "EXTI1", "EXTI2", "EXTI3", "EXTI4",
+            "DMA1_Stream0", "DMA1_Stream1", "DMA1_Stream2", "DMA1_Stream3",
+            "DMA1_Stream4", "DMA1_Stream5", "DMA1_Stream6", "ADC",
+            "FDCAN1_IT0", "FDCAN1_IT1", "FDCAN2_IT0", "FDCAN2_IT1",
+            "EXTI9_5", "TIM1_BRK", "TIM1_UP", "TIM1_TRG_COM",
+            "TIM1_CC", "TIM2", "TIM3", "TIM4", "I2C1_EV", "I2C1_ER",
+            "I2C2_EV", "I2C2_ER", "SPI1", "SPI2",
+            "USART1", "USART2", "USART3", "EXTI15_10", "RTC_Alarm",
+            "OTG_FS_WKUP", "TIM8_BRK_TIM12", "TIM8_UP_TIM13", "TIM8_TRG_COM_TIM14",
+            "TIM8_CC", "DMA1_Stream7", "FMC", "SDMMC1", "TIM5", "SPI3",
+            "UART4", "UART5", "TIM6_DAC", "TIM7", "DMA2_Stream0",
+            "DMA2_Stream1", "DMA2_Stream2", "DMA2_Stream3", "DMA2_Stream4",
+            "ETH", "ETH_WKUP", "FDCAN3_IT0", "FDCAN3_IT1", "OTG_FS",
+            "DMA2_Stream5", "DMA2_Stream6", "DMA2_Stream7",
+            "USART6", "I2C3_EV", "I2C3_ER", "OTG_HS_EP1_OUT", "OTG_HS_EP1_IN",
+            "OTG_HS_WKUP", "OTG_HS", "DCMI", "CRYP", "HASH_RNG", "FPU",
+        ],
+    }
+
+    f4_count = len(exti_irqs.get("f4", []))
+    exti_list = exti_irqs.get(family, exti_irqs["f4"])
+    exti_lines = "\n".join(f"  .word {n}_IRQHandler" for n in exti_list)
+    # 补足 240 项
+    padding = 240 - len(exti_list)
+    exti_padding = "\n".join(["  .word Default_Handler"] * padding) if padding > 0 else ""
+
+    weak_defs = "\n".join(
+        f".weak {n}_IRQHandler\n.thumb_set {n}_IRQHandler, Default_Handler"
+        for n in exti_list
+    )
+
     content = f"""\
-/* Auto-generated GCC startup file for {mcu} */
+/* Auto-generated GCC startup file for {mcu} ({family}) */
 .syntax unified
 {cpu_line}{fpu_line}.thumb
 
@@ -500,10 +583,8 @@ g_pfnVectors:
   .word 0
   .word PendSV_Handler
   .word SysTick_Handler
-  /* External interrupts — weak default handlers */
-  .rept 240
-  .word Default_Handler
-  .endr
+{exti_lines}
+{exti_padding}
 .size g_pfnVectors, . - g_pfnVectors
 
 /* === Reset Handler === */
@@ -540,7 +621,7 @@ Reset_Handler:
   bl main
   b .
 
-/* === 弱定义 SystemInit（用户如有 system_stm32xxx.c 会覆盖） === */
+/* === 弱定义 SystemInit === */
 .section .text.SystemInit,"ax",%progbits
 .global SystemInit
 .weak SystemInit
@@ -568,6 +649,10 @@ DEF_IRQ SVC_Handler
 DEF_IRQ DebugMon_Handler
 DEF_IRQ PendSV_Handler
 DEF_IRQ SysTick_Handler
+
+/* === 外部中断弱别名（用户定义同名函数会自动覆盖） === */
+{weak_defs}
+
 DEF_IRQ Default_Handler
 """
     startup_path.write_text(content, encoding="utf-8")
