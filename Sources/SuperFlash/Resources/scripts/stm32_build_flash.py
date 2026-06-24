@@ -515,13 +515,20 @@ def generate_startup_file(project: Path, mcu: str) -> Path:
             "I2C2_EV", "I2C2_ER", "SPI1", "SPI2",
             "USART1", "USART2", "USART3", "EXTI15_10", "RTC_Alarm",
             "OTG_FS_WKUP", "TIM8_BRK_TIM12", "TIM8_UP_TIM13", "TIM8_TRG_COM_TIM14",
-            "TIM8_CC", "DMA1_Stream7", "FMC", "SDIO", "TIM5", "SPI3",
+            "TIM8_CC", "DMA1_Stream7", "FMC", "SDMMC1", "TIM5", "SPI3",
             "UART4", "UART5", "TIM6_DAC", "TIM7", "DMA2_Stream0",
             "DMA2_Stream1", "DMA2_Stream2", "DMA2_Stream3", "DMA2_Stream4",
             "ETH", "ETH_WKUP", "CAN2_TX", "CAN2_RX0", "CAN2_RX1", "CAN2_SCE",
             "OTG_FS", "DMA2_Stream5", "DMA2_Stream6", "DMA2_Stream7",
             "USART6", "I2C3_EV", "I2C3_ER", "OTG_HS_EP1_OUT", "OTG_HS_EP1_IN",
-            "OTG_HS_WKUP", "OTG_HS", "DCMI", "CRYP", "HASH_RNG", "FPU",
+            "OTG_HS_WKUP", "OTG_HS", "DCMI",
+            "RNG", "FPU",
+            "UART7", "UART8", "SPI4", "SPI5", "SPI6",
+            "SAI1", "LTDC", "LTDC_ER", "DMA2D", "SAI2",
+            "QUADSPI", "LPTIM1", "CEC", "I2C4_EV", "I2C4_ER", "SPDIF_RX",
+            "SDMMC2",
+            "CAN3_TX", "CAN3_RX0", "CAN3_RX1", "CAN3_SCE",
+            "JPEG", "MDIOS",
         ],
         "h7": [ "WWDG", "PVD", "TAMP_STAMP", "RTC_WKUP", "FLASH", "RCC",
             "EXTI0", "EXTI1", "EXTI2", "EXTI3", "EXTI4",
@@ -620,16 +627,6 @@ Reset_Handler:
   bl SystemInit
   bl main
   b .
-
-/* === 弱定义 SystemInit === */
-.section .text.SystemInit,"ax",%progbits
-.global SystemInit
-.weak SystemInit
-.type SystemInit, %function
-.thumb_func
-SystemInit:
-  bx lr
-
 /* === 异常处理程序 === */
 .macro DEF_IRQ name
 .section .text.\\name,"ax",%progbits
@@ -697,6 +694,25 @@ def discover_sources(project: Path, mcu: str | None = None, flash_size_arg: str 
             raise SystemExit("No linker script (.ld) found. Pass --mcu to auto-generate one.")
     else:
         linker = sorted(linker_candidates, key=lambda p: (len(p.parts), p.name))[0].resolve()
+    # 如果没有 system_stm32xxx.c，在 codex_build/ 生成一个空的（编译通过，跑默认时钟）
+    if mcu:
+        sys_name = "system_stm32" + family_from_mcu(mcu) + "xx.c"
+        if not any(p.name == sys_name for p in c_sources):
+            sys_path = project / "codex_build" / sys_name
+            if not sys_path.exists():
+                sys_path.write_text(f"""/* Auto-generated {sys_name} for {mcu} */
+
+void SystemInit(void) {{
+    /* 空白实现：芯片在默认时钟运行。若要完整时钟，请从芯片包复制或
+       自行实现 SetSysClock()。 */
+    (void)0;
+}}
+
+void SystemCoreClockUpdate(void) {{
+    (void)0;
+}}
+""", encoding="utf-8")
+            c_sources.append(sys_path.resolve())
     startup_candidates = [p for p in asm_sources if "startup_stm32" in p.name.lower()]
     if not startup_candidates:
         startup = generate_startup_file(project, mcu)
