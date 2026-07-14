@@ -589,11 +589,12 @@ def flash_or_verify_dslite_jlink(kind: str, project: Path, info: dict[str, Path 
     lower = output.lower()
     if kind == "flash":
         succeeded = code == 0 and "success" in lower and ("running" in lower or "loaded" in lower)
-        # DSLite 的 loaded/running 只表示下载流程结束，不保证目标已完成一次干净复位。
-        # 连接已被 DSLite 唤醒后，再用 J-Link 的 MSPM0 设备级 reset 启动并读取寄存器，
-        # 避免“工具显示成功但 MCU 卡死”的假成功。
+        # DSLite 的 loaded/running 既不保证完整写入，也不保证目标完成干净复位。
+        # 用 DSLite 唤醒冷启动 DAP 后，再由 J-Link 完整 loadfile、校验、复位并运行。
         if succeeded:
-            succeeded = finalize_mspm0_after_dslite(project, info, args, report)
+            succeeded = finalize_mspm0_after_dslite(project, info, args, report, program_hex=True)
+            if succeeded:
+                info["flash_verified"] = "jlink_loadfile_verified"
     else:
         succeeded = code == 0 and "success" in lower and "verification successful" in lower
         # DSLite verify 只保证 Flash 内容一致，不承诺退出时 CPU 仍在运行。
@@ -616,8 +617,9 @@ def finalize_mspm0_after_dslite(
     info: dict[str, Path | str | list[Path]],
     args: argparse.Namespace,
     report: list[str],
+    program_hex: bool = False,
 ) -> bool:
-    """Perform a clean MSPM0 reset/run after DSLite and prove the CPU is responsive."""
+    """Optionally program with J-Link, then reset/run and prove the CPU is responsive."""
     try:
         jlink = find_jlink(args.jlink)
     except SystemExit as error:
@@ -626,11 +628,14 @@ def finalize_mspm0_after_dslite(
 
     tool_dir = Path(str(info["tool_dir"]))
     script = tool_dir / "jlink_finalize_after_dslite.jlink"
+    program_command = f'loadfile "{Path(str(info["hex"]))}"\n' if program_hex else ""
     write_file(
         script,
-        """connect
+        f"""connect
 h
 r
+h
+{program_command}r
 h
 Sleep 100
 regs
@@ -669,20 +674,28 @@ exit
     last_registers = output.rfind("IPSR = 000")
     last_no_exception = output.rfind("(NoException)")
     last_go = output.rfind("J-Link>g")
+    last_download = max(output.rfind("Downloading file"), output.rfind("Flash download"))
+    last_ok = output.rfind("O.K.")
+    programming_succeeded = (
+        not program_hex
+        or (last_download > last_error and last_ok > last_download)
+    )
     succeeded = (
         code == 0
+        and programming_succeeded
         and last_registers > last_error
         and last_no_exception >= last_registers
         and last_go > last_registers
     )
+    operation = "program/reset/validation" if program_hex else "reset/validation"
     report.extend([
-        f"Post-flash reset/validation via JLinkExe: {'OK' if succeeded else 'FAILED'}",
+        f"Post-DSLite J-Link {operation}: {'OK' if succeeded else 'FAILED'}",
         f"Post-flash command exit code: {code}",
         "```text",
         output.strip(),
         "```",
     ])
-    log(f"[JLink] post-flash reset/validation: {'OK' if succeeded else 'FAILED'}")
+    log(f"[JLink] post-DSLite {operation}: {'OK' if succeeded else 'FAILED'}")
     return succeeded
 
 
@@ -823,7 +836,12 @@ def main() -> int:
                 raise SystemExit(f"HEX file not found: {info['hex']}. Run --action build first.")
             flash_or_verify("flash", project, info, args, report)
         if args.action in {"verify", "all"}:
-            flash_or_verify("verify", project, info, args, report)
+            if args.action == "all" and info.get("flash_verified") == "jlink_loadfile_verified":
+                message = "Verify skipped: J-Link loadfile already completed Program & Verify and final reset/run validation."
+                report.append(message)
+                log(message)
+            else:
+                flash_or_verify("verify", project, info, args, report)
     finally:
         write_report(project, report, info, args.action)
     return 0

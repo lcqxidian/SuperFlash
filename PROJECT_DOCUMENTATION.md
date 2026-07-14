@@ -427,7 +427,7 @@ ti_mspm0_build_flash.py 主流程:
   ├── [4] 收集源文件 (parse_ccs_sources / glob fallback)
   ├── [5] 编译所有 .c 文件
   ├── [6] 链接生成 .out (ELF)
-  └── [7] 烧录 (choose_probe → flash_or_verify)
+  └── [7] 烧录 (choose_probe → DSLite 唤醒/下载 → J-Link 完整写入校验与启动验证)
 ```
 
 ### 4.2 第一步：查找 TI Arm Clang（find_cgt_root）
@@ -645,7 +645,7 @@ def flash_or_verify_xds110(kind, project, info, args, report):
         flash_or_verify_dslite_jlink(kind, project, info, args, report)
 ```
 
-#### 4.6.3 路径 2：SAM-ICE / J-Link ARM-OB（flash_or_verify → dslite_jlink）
+#### 4.6.3 路径 2：SAM-ICE / J-Link ARM-OB（确定性两阶段烧录）
 
 SAM-ICE 是 Atmel 出品的老 J-Link 变体（2012 年固件）。
 
@@ -653,14 +653,10 @@ SAM-ICE 是 Atmel 出品的老 J-Link 变体（2012 年固件）。
 def flash_or_verify(kind, project, info, args, report):
     probe = choose_probe(args)
     if probe == "dslite_jlink":
-        # 先尝试原生 JLinkExe 烧录
-        try:
-            successfully = flash_or_verify_jlink(kind, project, info, args, report)
-        except SystemExit:
-            successfully = False
-        if not successfully:
-            # JLinkExe 失败（DAP 初始化失败）→ 用 DSLite 回退
-            flash_or_verify_dslite_jlink(kind, project, info, args, report)
+        # 老 SAM-ICE 冷启动时直接使用 JLinkExe 容易 DAP 初始化失败。
+        # DSLite 先建立连接并唤醒 DAP；随后 J-Link 重新完整写入并校验固件，
+        # 再执行设备级复位、寄存器读取和 go，确认 CPU 已正常启动。
+        flash_or_verify_dslite_jlink(kind, project, info, args, report)
 ```
 
 #### 4.6.4 JLinkExe 直接烧录（flash_or_verify_jlink）
@@ -716,9 +712,9 @@ def jlink_output_succeeded(kind, output):
     return False
 ```
 
-#### 4.6.5 DSLite 回退烧录（flash_or_verify_dslite_jlink）
+#### 4.6.5 DSLite + J-Link 两阶段烧录（flash_or_verify_dslite_jlink）
 
-SAM-ICE 和 MSPM0 之间 DAP 初始化经常失败，所以 DSLite 作最终回退。
+SAM-ICE 和 MSPM0 在冷启动时 DAP 初始化不稳定，因此先让 DSLite 建立连接；不能把 DSLite 的 `Success` 单独作为最终成功，因为实测曾出现较大固件只写入一部分、未写地址仍为 `0xFF` 的假成功。
 
 ```python
 def flash_or_verify_dslite_jlink(kind, project, info, args, report):
@@ -746,13 +742,22 @@ def flash_or_verify_dslite_jlink(kind, project, info, args, report):
                 "success" in output.lower() and
                 ("running" in output.lower() or "loaded" in output.lower()))
 
-    # 成功后用 JLinkExe 强制运行（DSLite 可能拉住芯片复位）
+    # DSLite 成功仅代表连接/下载阶段结束；随后必须让 J-Link 重新完整写入并校验。
     if succeeded:
-        subprocess.run([jlink, "-NoGui", "1", "-Device", device,
-                       "-If", "SWD", "-Speed", "4000",
-                       "-CommandFile", "/dev/stdin"],
-                      input="g\nexit\n", text=True, timeout=10)
+        succeeded = finalize_mspm0_after_dslite(
+            project, info, args, report, program_hex=True
+        )
+        if succeeded:
+            info["flash_verified"] = "jlink_loadfile_verified"
 ```
+
+`finalize_mspm0_after_dslite()` 生成并执行 J-Link 命令：`connect → halt → device-specific reset → halt → loadfile → reset → halt → regs → go`。成功条件同时要求：
+
+- `loadfile` 输出下载记录及 `O.K.`，证明 J-Link 自带的 Program & Verify 完成；
+- 最后一次错误之后读到 `IPSR = 000 (NoException)`；
+- `go` 命令确实执行。
+
+`build-flash` 已包含上述完整校验，因此不再重复执行第二轮探针枚举、DSLite 回读和 J-Link 复位；显式 `verify` 命令仍保留独立回读验证。
 
 #### 4.6.6 ccxml 文件
 
@@ -924,7 +929,7 @@ Type: bugfix | test | release
 
 Files modified:
 
-- `Sources/SuperFlash/Resources/scripts/ti_mspm0_build_flash.py`：SAM-ICE 不再先执行已知不可靠的冷启动 JLinkExe 连接，改为直接使用 DSLite；DSLite 烧录后通过配置的 JLinkExe 执行 MSPM0 设备级 reset/halt/go，并读取寄存器确认 CPU 响应；不再跳过 SAM-ICE verify，也不再使用无效的普通重试掩盖失败。
+- `Sources/SuperFlash/Resources/scripts/ti_mspm0_build_flash.py`：SAM-ICE 不再先执行已知不可靠的冷启动 JLinkExe 连接；改为 DSLite 唤醒 DAP 后，由 J-Link `loadfile` 完整写入并校验，再执行 MSPM0 设备级 reset/halt/regs/go 确认 CPU 正常运行；`build-flash` 跳过已经由 J-Link 覆盖的重复第二轮验证，显式 `verify` 保持不变。
 - `Sources/SuperFlash/App/AppState.swift`：TI MSPM0 不再执行无效的项目切换探针预热。
 - `Sources/SuperFlash/Services/ScriptRunner.swift`：禁用 TI `Device UNKNOWN` JLinkExe 预热实现。
 
@@ -942,8 +947,12 @@ Validation:
 - 目标板彻底断电并重新上电后的首次 `build-flash`：一次成功完成，DSLite 下载正常、J-Link post-flash reset/validation 为 OK、DSLite HEX verification successful、CLI 退出码 0，总耗时 19.25 秒。随后读取 PC=0x34E4 且通用寄存器为正常运行值，证明 MCU 在运行；再次执行设备级复位后 PC 正确位于 `Reset_Handler` 0x352C 并执行 `go`。
 - 为保证 `build-flash` 的最终退出状态确定可运行，DSLite `-v` 校验成功后也会再执行一次 J-Link 设备级 reset/register validation/go。最新版已重新构建、部署并签名。
 - 最新版再次执行完整 `build-flash` 回归：Flash 后 post-flash validation 为 OK，DSLite HEX verification successful，校验后的第二次 post-flash validation 也为 OK，CLI 退出码 0，总耗时 21.24 秒；任务结束时 MCU 已明确复位并运行。
+- Test5（23856 字节）暴露 DSLite 部分写入假成功：DSLite 报告 Success，但 DSLite 与独立 J-Link 均确认地址 0x00000C00 仍为 0xFF，期望值为 0x0D；该地址位于 `main()` 机器代码。根因是老 SAM-ICE 的不稳定 DAP/Flash 下载链，不是项目源码或链接布局。
+- 烧录流程升级为确定性两阶段：DSLite 只负责冷启动连接/唤醒 DAP，随后 J-Link 必须执行完整 `loadfile`（自带 Program & Verify）、设备级复位、寄存器验证和 `go`；之后仍执行 DSLite HEX 回读校验及最终 J-Link 复位运行。
+- 修复后 Test5 真实 `build-flash` 一次通过：J-Link program/reset/validation OK、DSLite Program verification successful、最终 J-Link reset/validation OK，CLI 退出码 0，总耗时 20.83 秒。由此消除了“小项目可烧、大项目部分写入”的不确定性。
+- 对 `--action all` 去除两阶段流程之后重复的第二轮探针枚举、DSLite 回读校验和 J-Link 复位：J-Link `loadfile` 本身已经完成完整 Program & Verify，且同一轮仍执行最终设备级复位、寄存器检查和 `go`；显式 `verify` 操作保持不变。Test5 实机回归一次通过，总耗时由 20.83 秒降到 11.67 秒，减少 9.16 秒（约 44%）。
 
 Decision:
 
 - DSLite 的 `loaded/running` 输出不再单独视为最终成功。只有烧录完成后 JLinkExe 能完成设备级复位并读取到 `IPSR = 000 (NoException)`，才确认烧录后启动成功。
-- 未经用户本人明确允许，不执行任何 Git 写操作；本次未执行 Git 写操作。
+- 未经用户本人明确允许，不执行任何 Git 写操作；本次 Git 提交由用户在 2026-07-14 明确授权，仅包含上述 TI 烧录脚本与项目文档变更，不推送远端。
