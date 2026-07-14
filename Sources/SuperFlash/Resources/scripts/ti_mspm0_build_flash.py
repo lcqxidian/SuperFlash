@@ -363,6 +363,28 @@ def write_xds110_ccxml(tool_dir: Path, device: str) -> Path:
     return ccxml
 
 
+def write_jlink_ccxml(tool_dir: Path, device: str) -> Path:
+    ccxml = tool_dir / "jlink_mspm0.ccxml"
+    write_file(
+        ccxml,
+        f"""<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<configurations XML_version="1.2" id="configurations_0">
+    <configuration XML_version="1.2" id="SEGGER J-Link Emulator_0">
+        <instance XML_version="1.2" desc="SEGGER J-Link Emulator_0" href="connections/segger_j-link_connection.xml" id="SEGGER J-Link Emulator_0" xml="segger_j-link_connection.xml" xmlpath="connections"/>
+        <connection XML_version="1.2" id="SEGGER J-Link Emulator_0">
+            <instance XML_version="1.2" href="drivers/jlinkcs_dap.xml" id="drivers" xml="jlinkcs_dap.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/jlinkcortexm0p.xml" id="drivers" xml="jlinkcortexm0p.xml" xmlpath="drivers"/>
+            <instance XML_version="1.2" href="drivers/jlinksec_ap.xml" id="drivers" xml="jlinksec_ap.xml" xmlpath="drivers"/>
+            <platform XML_version="1.2" id="platform_0">
+                <instance XML_version="1.2" desc="{device}_0" href="devices/{device}.xml" id="{device}_0" xml="{device}.xml" xmlpath="devices"/>
+            </platform>
+        </connection>
+    </configuration>
+</configurations>""",
+    )
+    return ccxml
+
+
 def jlink_probe_description(jlink: Path) -> str:
     script = Path("/tmp/superflash_jlink_probe_info.jlink")
     write_file(script, "ShowEmuList\nexit\n")
@@ -493,20 +515,9 @@ def flash_or_verify(kind: str, project: Path, info: dict[str, Path | str | list[
     if probe == "xds110":
         flash_or_verify_xds110(kind, project, info, args, report)
     elif probe == "dslite_jlink":
-        report.append("SAM-ICE detected; trying JLinkExe first (DSLite fallback available)")
-        log("SAM-ICE detected; trying JLinkExe first")
-        if kind == "verify":
-            report.append("SAM-ICE: verify skipped (device runs immediately after flash)")
-            log("SAM-ICE: verify skipped")
-            return
-        try:
-            successfully = flash_or_verify_jlink(kind, project, info, args, report)
-        except SystemExit:
-            successfully = False
-        if not successfully:
-            report.append("JLinkExe failed; falling back to DSLite + J-Link ccxml")
-            log("JLinkExe failed; falling back to DSLite")
-            flash_or_verify_dslite_jlink(kind, project, info, args, report)
+        report.append("SAM-ICE detected; using DSLite directly to avoid the unreliable cold JLinkExe connection")
+        log("SAM-ICE detected; using DSLite directly")
+        flash_or_verify_dslite_jlink(kind, project, info, args, report)
     else:
         successfully = flash_or_verify_jlink(kind, project, info, args, report)
         if not successfully:
@@ -553,18 +564,19 @@ def flash_or_verify_jlink(kind: str, project: Path, info: dict[str, Path | str |
 
 
 def flash_or_verify_dslite_jlink(kind: str, project: Path, info: dict[str, Path | str | list[Path]], args: argparse.Namespace, report: list[str]) -> None:
-    """Use DSLite with the project's existing J-Link ccxml as a fallback."""
-    if kind == "verify":
-        report.append("SAM-ICE/DSLite: verify skipped (device runs immediately after flash)")
-        log("SAM-ICE/DSLite: verify skipped (device runs immediately after flash)")
-        return
+    """Use DSLite with the project's existing J-Link ccxml for SAM-ICE."""
     dslite = find_dslite(args.dslite)
     if dslite is None:
         raise SystemExit("DSLite not found for fallback.")
-    ccxmls = list(project.glob("targetConfigs/*.ccxml"))
-    if not ccxmls:
+    ccxmls = [p for p in project.glob("targetConfigs/*.ccxml")]
+    # 优先选 J-Link 配置的 ccxml；全是 XDS110 的话自动生成 J-Link 版
+    jlink_ccxmls = [c for c in ccxmls if "jlink" in c.read_text(errors="ignore").lower()]
+    if jlink_ccxmls:
+        ccxml = jlink_ccxmls[0]
+    elif ccxmls:
+        ccxml = write_jlink_ccxml(project / "codex_build", str(info.get("device", "MSPM0G3507")))
+    else:
         raise SystemExit("No targetConfigs/*.ccxml found for DSLite/J-Link fallback.")
-    ccxml = ccxmls[0]
     hex_path = Path(str(info["hex"]))
     title = "Flash" if kind == "flash" else "Verify"
     cmd = [str(dslite), "flash", f"--config={ccxml}"]
@@ -577,25 +589,17 @@ def flash_or_verify_dslite_jlink(kind: str, project: Path, info: dict[str, Path 
     lower = output.lower()
     if kind == "flash":
         succeeded = code == 0 and "success" in lower and ("running" in lower or "loaded" in lower)
-        # DSLite/SAM-ICE 烧录后可能拉住芯片复位不放，用 JLinkExe 强制 go 启动
-        jlink = shutil.which("JLinkExe")
-        if succeeded and jlink:
-            log("[JLink] Forcing go/run after DSLite flash...")
-            r = subprocess.run([jlink, "-NoGui", "1", "-Device", str(info.get("device", "UNKNOWN")),
-                               "-If", "SWD", "-Speed", "4000",
-                               "-CommandFile", "/dev/stdin"],
-                              input="g\nexit\n", text=True, capture_output=True, timeout=10)
-            log(f"[JLink] go result: rc={r.returncode}, out={r.stdout.strip()[-200:]}")
-        elif succeeded and not jlink:
-            log("[JLink] JLinkExe not found, skipping")
+        # DSLite 的 loaded/running 只表示下载流程结束，不保证目标已完成一次干净复位。
+        # 连接已被 DSLite 唤醒后，再用 J-Link 的 MSPM0 设备级 reset 启动并读取寄存器，
+        # 避免“工具显示成功但 MCU 卡死”的假成功。
+        if succeeded:
+            succeeded = finalize_mspm0_after_dslite(project, info, args, report)
     else:
         succeeded = code == 0 and "success" in lower and "verification successful" in lower
-        # SAM-ICE 冷启动后第一次 verify 常误报，重试一次即可
-        if not succeeded:
-            log("Verify failed on first attempt; retrying after warm-up...")
-            code, output = run(cmd, cwd=project, allow_fail=True)
-            lower = output.lower()
-            succeeded = code == 0 and "success" in lower and "verification successful" in lower
+        # DSLite verify 只保证 Flash 内容一致，不承诺退出时 CPU 仍在运行。
+        # 验证后再次执行设备级复位/运行，确保 build-flash 的最后状态可运行。
+        if succeeded:
+            succeeded = finalize_mspm0_after_dslite(project, info, args, report)
     report.extend([
         f"{title} result via DSLite+J-Link: {'OK' if succeeded else 'FAILED'}",
         f"{title} command exit code: {code}",
@@ -605,6 +609,81 @@ def flash_or_verify_dslite_jlink(kind: str, project: Path, info: dict[str, Path 
     ])
     if not succeeded:
         raise SystemExit(f"{kind} failed via DSLite+J-Link fallback.")
+
+
+def finalize_mspm0_after_dslite(
+    project: Path,
+    info: dict[str, Path | str | list[Path]],
+    args: argparse.Namespace,
+    report: list[str],
+) -> bool:
+    """Perform a clean MSPM0 reset/run after DSLite and prove the CPU is responsive."""
+    try:
+        jlink = find_jlink(args.jlink)
+    except SystemExit as error:
+        report.append(f"Post-flash reset/validation: FAILED ({error})")
+        return False
+
+    tool_dir = Path(str(info["tool_dir"]))
+    script = tool_dir / "jlink_finalize_after_dslite.jlink"
+    write_file(
+        script,
+        """connect
+h
+r
+h
+Sleep 100
+regs
+g
+Sleep 100
+exit
+""",
+    )
+    cmd = [
+        str(jlink),
+        "-NoGui",
+        "1",
+        "-Device",
+        str(info.get("device", "MSPM0G3507")),
+        "-If",
+        "SWD",
+        "-Speed",
+        str(args.speed),
+        "-CommandFile",
+        str(script),
+    ]
+    code, output = run(cmd, cwd=project, allow_fail=True, silent=True)
+    failure_patterns = [
+        "Failed to initialize DAP",
+        "Can not attach to CPU",
+        "Could not connect to the target device",
+        "Target connection not established",
+        "Connect failed",
+        "Cannot connect",
+        "****** Error:",
+    ]
+    # 老 SAM-ICE 在同一个命令文件中可能前几次连接失败、后续命令才恢复 DAP。
+    # 因此按最后一次错误之后是否成功读取寄存器并执行 go 判断最终状态，
+    # 不能因为日志前段有连接错误就否定后段已经完成的恢复。
+    last_error = max((output.rfind(pattern) for pattern in failure_patterns), default=-1)
+    last_registers = output.rfind("IPSR = 000")
+    last_no_exception = output.rfind("(NoException)")
+    last_go = output.rfind("J-Link>g")
+    succeeded = (
+        code == 0
+        and last_registers > last_error
+        and last_no_exception >= last_registers
+        and last_go > last_registers
+    )
+    report.extend([
+        f"Post-flash reset/validation via JLinkExe: {'OK' if succeeded else 'FAILED'}",
+        f"Post-flash command exit code: {code}",
+        "```text",
+        output.strip(),
+        "```",
+    ])
+    log(f"[JLink] post-flash reset/validation: {'OK' if succeeded else 'FAILED'}")
+    return succeeded
 
 
 def flash_or_verify_xds110(kind: str, project: Path, info: dict[str, Path | str | list[Path]], args: argparse.Namespace, report: list[str]) -> None:
@@ -633,7 +712,9 @@ def flash_or_verify_xds110(kind: str, project: Path, info: dict[str, Path | str 
         "```",
     ])
     if not succeeded:
-        raise SystemExit(f"{title.lower()} failed through DSLite/XDS110. See codex_build/TI_BUILD_FLASH_REPORT.md.")
+        report.append(f"DSLite/XDS110 failed; falling back to J-Link")
+        log(f"DSLite/XDS110 failed; falling back to J-Link")
+        flash_or_verify_dslite_jlink(kind, project, info, args, report)
 
 
 def jlink_output_succeeded(kind: str, output: str) -> bool:

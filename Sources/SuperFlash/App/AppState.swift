@@ -309,8 +309,9 @@ final class AppState: ObservableObject {
             }
         }
 
-        // 项目切换探针预热：清空探针内部状态，避免首次烧录异常
-        if action != .build, project.rootURL != lastFlashedProjectURL {
+        // TI/SAM-ICE 的冷启动预热已确认无效，并会额外增加首次烧录耗时。
+        // STM32 仍保留原有 OpenOCD 预热行为。
+        if action != .build, vendor == .stm32, project.rootURL != lastFlashedProjectURL {
             scriptRunner.warmupProbe(vendor: vendor)
         }
 
