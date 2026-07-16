@@ -6,28 +6,21 @@ SuperFlash 是一款面向 macOS 的 STM32 与 TI MSPM0 编译、烧录和基础
 
 仓库地址：<https://github.com/lcqxidian/SuperFlash>
 
-## 0. 分享链接之前：仓库当前是 Private
+## 0. 直接分享链接：仓库当前已公开
 
-截至 2026-07-16，GitHub 仓库 `lcqxidian/SuperFlash` 的可见性是 **PRIVATE**。未被授权的用户只打开链接会看到 404，并不能下载 `SuperFlash.dmg` 或阅读本文。
+截至 2026-07-16，GitHub 仓库 `lcqxidian/SuperFlash` 的可见性是 **PUBLIC**。新用户可以直接打开链接、阅读本文和下载 `SuperFlash.dmg`，不需要先成为 collaborator。
 
-维护者在分享前必须选择一种方式：
-
-1. 在 GitHub 仓库设置中邀请对方成为 collaborator；
-2. 将仓库改为 public，并在操作前检查源码、历史提交和大文件中没有密钥或隐私信息；
-3. 保持 private，但单独通过可信渠道发送 DMG 和这份 README；
-4. 建立 GitHub Release，只发布准备公开的安装包和校验值。
-
-如果使用私有仓库，接收方需要先登录已获得授权的 GitHub 账号。Codex 可以检查：
+获取仓库可以使用：
 
 ```bash
-gh auth status
-gh repo view lcqxidian/SuperFlash --json nameWithOwner,visibility,url
+git clone https://github.com/lcqxidian/SuperFlash.git
+# 或已经安装并登录 GitHub CLI 时：
 gh repo clone lcqxidian/SuperFlash
 ```
 
-如果 `gh repo view` 返回 404 或 `Could not resolve to a Repository`，先处理 GitHub 访问权限，不要把它误判为 Git、网络或 SuperFlash 安装失败。
+如果公开链接仍返回 404，先核对仓库地址、网络和 GitHub 服务状态。不要改用来源不明的镜像或第三方转存安装包。
 
-> 改变仓库可见性、邀请协作者、创建 Release 都会改变外部访问状态，Codex 必须先获得仓库所有者明确许可。
+> 仓库已经公开，源码、提交历史、DMG 和提交元数据都可被任何人查看。以后改变仓库可见性、删除仓库或发布 Release，Codex 仍必须先获得仓库所有者明确许可。
 
 ## 1. 使用前先确认
 
@@ -802,7 +795,7 @@ Codex 配置新电脑时必须遵守：
 请帮我在这台 Mac 上安装并配置 SuperFlash：
 https://github.com/lcqxidian/SuperFlash
 
-该仓库目前可能是 Private。请先确认当前 GitHub 账号已被授权；如果无权访问，请停止并告诉我需要仓库所有者邀请，不要改用来源不明的镜像。
+该仓库当前是 Public。如果链接无法访问，请先核对地址、网络和 GitHub 状态，不要改用来源不明的镜像。
 
 请先完整阅读仓库根目录 README.md、AI接手提示词.md 和 PROJECT_DOCUMENTATION.md，再开始操作。
 
