@@ -34,8 +34,6 @@ final class AppState: ObservableObject {
 
     private let scriptRunner = ScriptRunner()
     private var cancellables = Set<AnyCancellable>()
-    private var projectWatcher: DispatchSourceFileSystemObject?
-    private var projectWatcherQueue = DispatchQueue(label: "com.superflash.projectwatcher")
 
     /// 日志节流：避免每行编译输出都触发 UI 刷新
     private var logBuffer = ""
@@ -434,49 +432,11 @@ final class AppState: ObservableObject {
             recentProjectStore.add(info)
         }
 
-        startWatching(url)
-
         if info.vendor != .unknown {
             runState = .idle
         } else {
             runState = .failed("无法检测项目类型")
         }
-    }
-
-    /// 监听项目目录变动，AI/外部工具修改文件后自动刷新项目信息
-    private func startWatching(_ url: URL) {
-        projectWatcher?.cancel()
-        projectWatcher = nil
-
-        let fd = open(url.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete, .link],
-            queue: projectWatcherQueue
-        )
-        var debounceWork: DispatchWorkItem?
-        source.setEventHandler { [weak self] in
-            debounceWork?.cancel()
-            let work = DispatchWorkItem {
-                DispatchQueue.main.async {
-                    guard let self, let proj = self.currentProject else { return }
-                    let fresh = self.detector.detectProject(at: proj.rootURL)
-                    if fresh != proj {
-                        self.currentProject = fresh
-                        if self.settingsStore.saveRecentProjects {
-                            self.recentProjectStore.add(fresh)
-                        }
-                    }
-                }
-            }
-            debounceWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
-        }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        projectWatcher = source
     }
 
     func openSettings() {
